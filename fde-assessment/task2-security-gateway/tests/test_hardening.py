@@ -40,6 +40,7 @@ async def small_limit_client(downstream_app):
 # Body size
 # --------------------------------------------------------------------------
 async def test_oversized_body_is_rejected_with_413(small_limit_client, admin_token, call_log):
+    """A body over the cap is refused with the limit named, and never buffered onward."""
     payload = call("get_weather", {"city": "x" * 5_000})
     response = await small_limit_client.post("/mcp", json=payload, headers=bearer(admin_token))
     assert response.status_code == 413
@@ -49,6 +50,7 @@ async def test_oversized_body_is_rejected_with_413(small_limit_client, admin_tok
 
 
 async def test_body_just_under_the_cap_is_accepted(small_limit_client, admin_token):
+    """The cap does not fire early, so legitimate large requests still work."""
     payload = call("get_weather", {"city": "x" * 1_500})
     response = await small_limit_client.post("/mcp", json=payload, headers=bearer(admin_token))
     assert response.status_code == 200
@@ -73,6 +75,7 @@ async def test_lying_content_length_is_still_capped(small_limit_client, admin_to
 
 
 async def test_non_numeric_content_length_is_rejected(small_limit_client, admin_token):
+    """An unparseable length header is refused rather than treated as absent."""
     response = await small_limit_client.post(
         "/mcp",
         content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
@@ -94,6 +97,7 @@ async def test_oversized_body_is_rejected_before_authentication(small_limit_clie
 # Batch size
 # --------------------------------------------------------------------------
 async def test_oversized_batch_is_rejected(small_limit_client, admin_token, call_log):
+    """A batch over the cap is refused with both the limit and the received size reported."""
     batch = [listing(request_id=i) for i in range(20)]
     response = await small_limit_client.post("/mcp", json=batch, headers=bearer(admin_token))
     assert response.status_code == 413
@@ -104,6 +108,7 @@ async def test_oversized_batch_is_rejected(small_limit_client, admin_token, call
 
 
 async def test_batch_at_the_cap_is_accepted(small_limit_client, admin_token):
+    """Exactly at the cap is allowed, so the boundary is unambiguous."""
     batch = [listing(request_id=i) for i in range(5)]
     response = await small_limit_client.post("/mcp", json=batch, headers=bearer(admin_token))
     assert response.status_code == 200
@@ -111,6 +116,7 @@ async def test_batch_at_the_cap_is_accepted(small_limit_client, admin_token):
 
 
 async def test_batch_one_over_the_cap_is_rejected(small_limit_client, admin_token):
+    """One past the cap is refused, fixing the boundary from the other side."""
     batch = [listing(request_id=i) for i in range(6)]
     response = await small_limit_client.post("/mcp", json=batch, headers=bearer(admin_token))
     assert response.status_code == 413
@@ -130,6 +136,7 @@ async def test_oversized_batch_is_rejected_before_any_authorization_work(
 # Defaults and pooling
 # --------------------------------------------------------------------------
 def test_default_limits_are_set_and_sane():
+    """The shipped defaults are the documented ones, so the caps are not accidentally disabled."""
     assert gateway.MAX_BODY_BYTES == 1024 * 1024
     assert gateway.MAX_BATCH_SIZE == 100
 

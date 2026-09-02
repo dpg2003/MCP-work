@@ -68,6 +68,7 @@ def test_the_narrowing_gate_selects_the_cheap_pattern():
 
 
 def test_text_with_no_pii_characters_skips_scanning_entirely():
+    """Prose with neither an at-sign nor a digit selects no pattern at all, which is the cheapest path."""
     text = "the quick brown fox jumps over the lazy dog" * 100
     assert _pattern_for(text) is None
     assert list(find_matches(text)) == []

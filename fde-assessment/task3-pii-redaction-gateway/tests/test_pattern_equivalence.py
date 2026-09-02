@@ -73,6 +73,7 @@ def assert_equivalent(text: str) -> None:
     ],
 )
 def test_each_gate_branch_agrees_with_the_oracle(text):
+    """One input per branch of the narrowing gate, so no branch is left unexercised."""
     assert_equivalent(text)
 
 

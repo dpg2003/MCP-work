@@ -59,6 +59,7 @@ def assert_equivalent(text: str, max_hold: int = DEFAULT_MAX_HOLD) -> None:
     ],
 )
 def test_concrete_cases_match_the_backtracking_form(text):
+    """Twenty-three hand-picked shapes, including the empty string and every separator, checked against the original pattern."""
     assert_equivalent(text)
 
 

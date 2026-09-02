@@ -3,7 +3,7 @@
 Every case from the assessment test-case document, executed against the
 implementation and filled in automatically.
 
-- **Generated:** 2026-09-02 20:17:51 UTC
+- **Generated:** 2026-09-02 21:00:25 UTC
 - **Regenerate:** `python tools/assessment/run_matrix.py`
 - **Scope:** all four tasks, 54 cases — the complete assessment. (An earlier draft of the source document referenced a fifth task; it was confirmed not to exist.)
 
@@ -32,7 +32,7 @@ threshold. Rows marked `n/a` are informational rather than pass/fail.
 | 1.12 | Missing reason field | `-32602` Invalid params | **Pass** |
 | 1.13 | Unknown tool call | `-32601` Unknown tool | **Pass** |
 | 1.14 | Stdout purity | 36 stdout lines captured, all valid JSON-RPC 2.0; 0 stray lines | **Pass** |
-| 1.15 | Stderr logging | 36 log lines on stderr, 0 on stdout; e.g. `2026-09-02 20:17:53,665 INFO fde.mcp.server: fde-customer-op…` | **Pass** |
+| 1.15 | Stderr logging | 36 log lines on stderr, 0 on stdout; e.g. `2026-09-02 21:00:26,663 INFO fde.mcp.server: fde-customer-op…` | **Pass** |
 | 1.16 | Transport handshake | `initialize` OK (protocol 2025-06-18); `tools/list` returned ['get_customer_record', 'trigger_refund'] | **Pass** |
 
 ---
@@ -69,8 +69,8 @@ threshold. Rows marked `n/a` are informational rather than pass/fail.
 | 3.7 | No PII present | unchanged: True | **Pass** |
 | 3.8 | False-positive check | `Order number 123-45-6789X` → unchanged; `call 555-123-4567` → unchanged; `host 192.168.1.1` → unchanged; `order 1234567812345678` → unchanged; `product code 123456789` → unchanged | **Pass** |
 | 3.9 | Memory — no full buffering | 2.8 MB streamed; retained growth 0.3 KiB; peak buffer 81 chars (cap 256 + one chunk) | **Pass** |
-| 3.10 | Time to First Token | TTFT 74 ms of 528 ms total (upstream emits a chunk every 50 ms, so ~one chunk of delay, not the whole stream) | **Pass** |
-| 3.11 | Stream remains chunked | 8 separate chunks delivered, first at 74 ms, last at 528 ms | **Pass** |
+| 3.10 | Time to First Token | TTFT 73 ms of 527 ms total (upstream emits a chunk every 50 ms, so ~one chunk of delay, not the whole stream) | **Pass** |
+| 3.11 | Stream remains chunked | 8 separate chunks delivered, first at 73 ms, last at 527 ms | **Pass** |
 | 3.12 | Redaction at end-of-stream buffer flush | PII in held tail → `Here it is: [REDACTED]`; clean tail → `Nothing sensitive in this tail` (nothing dropped) | **Pass** |
 
 ---
@@ -85,9 +85,9 @@ threshold. Rows marked `n/a` are informational rather than pass/fail.
 | 4.4 | Sliding window eviction | clock +61 s → usage evicted to 0, new 50,000-token request allowed=True; stored rows now 1 | **Pass** |
 | 4.5 | Per-tenant isolation | tenant-a exhausted (usage 50000); tenant-b 50,000-token request allowed=True | **Pass** |
 | 4.6 | Primary returns HTTP 429 | HTTP 200, provider=secondary, failed_over=True | **Pass** |
-| 4.7 | Primary timeout (>3000 ms) | primary held 5,000 ms → failed over after 3042 ms, provider=secondary | **Pass** |
-| 4.8 | Primary responds just under timeout (~2900 ms) | responded in 2955 ms → provider=primary, failed_over=False | **Pass** |
-| 4.9 | Primary responds just over timeout (~3100 ms) | cut off at 3054 ms → provider=secondary, failed_over=True | **Pass** |
+| 4.7 | Primary timeout (>3000 ms) | primary held 5,000 ms → failed over after 3052 ms, provider=secondary | **Pass** |
+| 4.8 | Primary responds just under timeout (~2900 ms) | responded in 2952 ms → provider=primary, failed_over=False | **Pass** |
+| 4.9 | Primary responds just over timeout (~3100 ms) | cut off at 3055 ms → provider=secondary, failed_over=True | **Pass** |
 | 4.10 | Both primary and secondary fail | HTTP 502, single error `upstream_unavailable`, attempts=['primary:rate_limited', 'secondary:unavailable'] | **Pass** |
 | 4.11 | Error payload sanitization | upstream body contained a stack trace, an API key fragment and an internal hostname; leaked into the response: none. Client sees only `{"type": "upstream_unavailable", "message": "No model provider was able to serve…` | **Pass** |
 | 4.12 | Concurrent requests race condition | 32 simultaneous 5,000-token requests → exactly 10 admitted, final usage 50000 (limit 50,000). Serialised by `BEGIN IMMEDIATE`, so check-then-write cannot interleave. | **Pass** |

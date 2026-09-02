@@ -30,6 +30,7 @@ def error(response: dict) -> dict:
 # tools/list
 # --------------------------------------------------------------------------
 def test_tools_list_advertises_both_tools(client):
+    """Discovery must name both tools and expose their required fields, since the advertised schema is generated from the same models that enforce validation."""
     tools = client.request("tools/list")["result"]["tools"]
     assert {t["name"] for t in tools} == {"get_customer_record", "trigger_refund"}
     refund = next(t for t in tools if t["name"] == "trigger_refund")
@@ -40,6 +41,7 @@ def test_tools_list_advertises_both_tools(client):
 # get_customer_record
 # --------------------------------------------------------------------------
 def test_get_customer_record_happy_path(client):
+    """The baseline: a well-formed id returns the seeded record intact."""
     record = payload(client.call_tool("get_customer_record", {"customer_id": VALID_ID}))
     assert record["customer_id"] == VALID_ID
     assert record["name"] == "Ada Lovelace"
@@ -61,17 +63,20 @@ def test_get_customer_record_happy_path(client):
     ],
 )
 def test_get_customer_record_rejects_malformed_ids(client, bad_id):
+    """Nine spellings that must all fail validation rather than reach the datastore, covering length, case, prefix, padding and injection attempts."""
     err = error(client.call_tool("get_customer_record", {"customer_id": bad_id}))
     assert err["code"] == INVALID_PARAMS
     assert err["data"]["errors"][0]["field"] == "customer_id"
 
 
 def test_get_customer_record_missing_argument(client):
+    """An absent required field is a validation failure, not a lookup for None."""
     err = error(client.call_tool("get_customer_record", {}))
     assert err["code"] == INVALID_PARAMS
 
 
 def test_get_customer_record_extra_argument_is_rejected(client):
+    """extra='forbid' means an unexpected key is refused outright, so a client cannot smuggle a field the server silently ignores."""
     err = error(
         client.call_tool("get_customer_record", {"customer_id": VALID_ID, "admin": True})
     )
@@ -91,6 +96,7 @@ def test_unknown_customer_is_a_distinct_error_not_a_validation_error(client):
 # trigger_refund
 # --------------------------------------------------------------------------
 def test_trigger_refund_happy_path(client):
+    """A fully valid refund is accepted and returns the created record."""
     result = payload(
         client.call_tool(
             "trigger_refund",
@@ -115,6 +121,7 @@ def test_trigger_refund_accepts_integer_amount(client):
 
 @pytest.mark.parametrize("amount", [0, 0.0, -1, -0.01])
 def test_trigger_refund_rejects_non_positive_amount(client, amount):
+    """Zero and negatives are refused; a refund of nothing is a bug in the caller, not a no-op to absorb."""
     err = error(
         client.call_tool(
             "trigger_refund",
@@ -127,6 +134,7 @@ def test_trigger_refund_rejects_non_positive_amount(client, amount):
 
 @pytest.mark.parametrize("amount", ["12.50", None, True, [1], {"v": 1}])
 def test_trigger_refund_rejects_wrong_amount_types(client, amount):
+    """strict=True means no coercion: a numeric string, null, bool, list or object is never quietly turned into a float."""
     err = error(
         client.call_tool(
             "trigger_refund",
@@ -158,6 +166,7 @@ def test_trigger_refund_rejects_nan_and_infinity(client, literal):
 
 
 def test_trigger_refund_amount_above_documented_cap_is_rejected_not_truncated(client):
+    """An over-cap amount is refused with -32602 rather than silently clipped to the maximum."""
     err = error(
         client.call_tool(
             "trigger_refund",
@@ -169,6 +178,7 @@ def test_trigger_refund_amount_above_documented_cap_is_rejected_not_truncated(cl
 
 
 def test_reason_boundary_nine_chars_fails_ten_passes(client):
+    """The exact minimum-length boundary: nine characters fail, ten pass."""
     nine = error(
         client.call_tool(
             "trigger_refund", {"customer_id": VALID_ID, "amount": 1.0, "reason": "a" * 9}
@@ -197,6 +207,7 @@ def test_whitespace_only_reason_is_rejected(client):
 
 
 def test_padded_reason_is_trimmed_before_storing(client):
+    """The stored reason is the trimmed value, so padding cannot be used to pad out the length requirement or the audit record."""
     result = payload(
         client.call_tool(
             "trigger_refund",
@@ -207,6 +218,7 @@ def test_padded_reason_is_trimmed_before_storing(client):
 
 
 def test_unicode_reason_is_preserved(client):
+    """Length is counted in characters, so CJK text and emoji round-trip unchanged instead of being rejected or mangled."""
     reason = "重複請求 — refund 🙏 requested by the customer"
     result = payload(
         client.call_tool(
@@ -217,6 +229,7 @@ def test_unicode_reason_is_preserved(client):
 
 
 def test_oversized_reason_is_rejected_not_truncated(client):
+    """An over-length reason is refused rather than silently truncated, so no audit record is quietly shortened."""
     err = error(
         client.call_tool(
             "trigger_refund",
@@ -228,6 +241,7 @@ def test_oversized_reason_is_rejected_not_truncated(client):
 
 
 def test_refund_for_unknown_customer_is_not_found(client):
+    """A refund against a well-formed but unknown id is -32000, the same distinction the read path makes."""
     err = error(
         client.call_tool(
             "trigger_refund",
@@ -241,16 +255,19 @@ def test_refund_for_unknown_customer_is_not_found(client):
 # tool dispatch
 # --------------------------------------------------------------------------
 def test_unknown_tool_is_method_not_found(client):
+    """An unrecognised tool name is -32601, never a silent no-op."""
     err = error(client.call_tool("delete_everything", {}))
     assert err["code"] == METHOD_NOT_FOUND
     assert err["data"]["tool"] == "delete_everything"
 
 
 def test_tool_names_are_case_sensitive(client):
+    """Tool dispatch is case-sensitive, so a near-miss name is unknown rather than quietly resolved."""
     err = error(client.call_tool("Get_Customer_Record", {"customer_id": VALID_ID}))
     assert err["code"] == METHOD_NOT_FOUND
 
 
 def test_arguments_must_be_an_object(client):
+    """A non-object arguments payload is a validation failure, not an attempt to index a list by field name."""
     err = error(client.call_tool("get_customer_record", ["CUST-A1B2C"]))
     assert err["code"] == INVALID_PARAMS

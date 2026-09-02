@@ -36,6 +36,7 @@ def serial_oracle(db_path, clock, requests, limit_tokens=50_000):
 # Batch == serial, exactly
 # --------------------------------------------------------------------------
 def test_batch_matches_serial_for_a_simple_sequence(limiter, db_path, clock, tmp_path):
+    """A hand-checked sequence, compared against both a serial oracle and the expected answer."""
     requests = [("a", 20_000), ("a", 20_000), ("a", 20_000), ("b", 50_000), ("b", 1)]
     batched = [d.allowed for d in limiter.try_consume_many(requests)]
     expected = serial_oracle(str(tmp_path / "oracle.sqlite3"), clock, requests)
@@ -51,23 +52,27 @@ def test_batch_decides_in_arrival_order(limiter):
 
 
 def test_batch_never_exceeds_the_limit(limiter):
+    """Twenty requests in one batch admit exactly as many as fit and no more."""
     decisions = limiter.try_consume_many([("a", 7_000)] * 20)
     assert sum(d.allowed for d in decisions) == 7          # 7 * 7000 = 49,000
     assert limiter.usage("a") == 49_000
 
 
 def test_batch_isolates_tenants(limiter):
+    """Batching does not blur tenants together; each budget is tracked separately within the transaction."""
     requests = [("a", 50_000), ("a", 1), ("b", 50_000), ("b", 1)]
     assert [d.allowed for d in limiter.try_consume_many(requests)] == [True, False, True, False]
     assert limiter.usage("a") == limiter.usage("b") == 50_000
 
 
 def test_empty_batch_is_a_no_op(limiter):
+    """An empty batch does no work rather than opening a pointless transaction."""
     assert limiter.try_consume_many([]) == []
     assert limiter.reconcile_many([]) == []
 
 
 def test_batch_rejects_negative_tokens_without_partial_application(limiter):
+    """A bad entry rejects the whole batch, leaving nothing partially applied."""
     with pytest.raises(ValueError):
         limiter.try_consume_many([("a", 10), ("a", -1)])
     assert limiter.usage("a") == 0, "a rejected batch must apply nothing"
@@ -92,6 +97,7 @@ def test_randomised_batches_match_the_serial_oracle(limiter, db_path, clock, tmp
 
 
 def test_batch_reservations_are_reconcilable(limiter):
+    """Reservations created in a batch can be corrected afterwards like any other."""
     decisions = limiter.try_consume_many([("a", 10_000), ("a", 10_000)])
     usage = limiter.reconcile_many(
         [(decisions[0].reservation_id, 5, "a"), (decisions[1].reservation_id, 7, "a")]
@@ -101,6 +107,7 @@ def test_batch_reservations_are_reconcilable(limiter):
 
 
 def test_reconcile_many_rejects_negatives_without_partial_application(limiter):
+    """The same all-or-nothing guarantee on the reconciliation path."""
     decision = limiter.try_consume_many([("a", 10_000)])[0]
     with pytest.raises(ValueError):
         limiter.reconcile_many([(decision.reservation_id, 5, "a"), (0, -1, None)])
@@ -111,6 +118,7 @@ def test_reconcile_many_rejects_negatives_without_partial_application(limiter):
 # The async controller
 # --------------------------------------------------------------------------
 async def test_concurrent_submissions_never_exceed_the_limit(controller):
+    """Thirty concurrent submissions admit exactly the number that fit, which is the property batching must not break."""
     decisions = await asyncio.gather(*[controller.try_consume("a", 5_000) for _ in range(30)])
     assert sum(d.allowed for d in decisions) == 10
     assert await controller.usage("a") == 50_000
@@ -118,6 +126,7 @@ async def test_concurrent_submissions_never_exceed_the_limit(controller):
 
 
 async def test_concurrent_submissions_across_tenants_are_independent(controller):
+    """Interleaved tenants in one batch each get their own budget honoured."""
     decisions = await asyncio.gather(
         *[controller.try_consume(f"tenant-{i % 4}", 20_000) for i in range(20)]
     )
@@ -146,6 +155,7 @@ async def test_results_are_returned_to_the_right_caller(controller):
 
 
 async def test_reconcile_is_batched_and_correct(controller):
+    """Ten concurrent reconciliations agree on the resulting usage."""
     decisions = await asyncio.gather(*[controller.try_consume("a", 1_000) for _ in range(10)])
     usages = await asyncio.gather(
         *[controller.reconcile(d.reservation_id, 3, "a") for d in decisions]
@@ -156,6 +166,7 @@ async def test_reconcile_is_batched_and_correct(controller):
 
 
 async def test_release_hands_the_whole_reservation_back(controller):
+    """The async facade releases as completely as the synchronous path."""
     decision = await controller.try_consume("a", 10_000)
     await controller.release(decision.reservation_id)
     assert await controller.usage("a") == 0
@@ -183,6 +194,7 @@ async def test_grouping_actually_happens_under_concurrency(limiter):
 
 
 async def test_max_batch_is_respected(limiter):
+    """The configured ceiling bounds how long one transaction can hold the write lock."""
     sizes: list[int] = []
     original = limiter.try_consume_many
 
@@ -242,6 +254,7 @@ async def test_event_loop_is_not_blocked_during_a_slow_database_call(limiter):
 # Failure and shutdown
 # --------------------------------------------------------------------------
 async def test_a_failing_batch_fails_every_waiter_rather_than_hanging(limiter):
+    """A database failure propagates to all five waiters; none is left awaiting a future that never resolves."""
     def boom(requests):
         """Fail every batch."""
         raise RuntimeError("database is on fire")
@@ -257,6 +270,7 @@ async def test_a_failing_batch_fails_every_waiter_rather_than_hanging(limiter):
 
 
 async def test_the_controller_recovers_after_a_failed_batch(limiter):
+    """One failure does not kill the worker; the next request is served normally."""
     calls = {"n": 0}
     original = limiter.try_consume_many
 
@@ -277,22 +291,26 @@ async def test_the_controller_recovers_after_a_failed_batch(limiter):
 
 
 async def test_submitting_after_close_raises_rather_than_hanging(controller):
+    """Post-shutdown submissions fail fast instead of blocking forever."""
     await controller.aclose()
     with pytest.raises(RuntimeError):
         await asyncio.wait_for(controller.try_consume("a", 1), timeout=5)
 
 
 async def test_aclose_is_idempotent(controller):
+    """Closing twice is safe, so shutdown paths need not coordinate."""
     await controller.try_consume("a", 1)
     await controller.aclose()
     await controller.aclose()
 
 
 async def test_close_without_any_traffic_is_safe(controller):
+    """Shutting down a controller that never started a worker is a no-op, not an error."""
     await controller.aclose()
 
 
 async def test_default_max_batch_is_sane():
+    """The shipped ceiling is a real bound rather than one or unbounded."""
     assert 1 < DEFAULT_MAX_BATCH <= 1024
 
 

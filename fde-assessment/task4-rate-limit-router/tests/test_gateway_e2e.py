@@ -74,6 +74,7 @@ def assert_standard_error(response, error_type: str):
 # Happy path and rate limiting
 # --------------------------------------------------------------------------
 async def test_request_under_the_limit_succeeds(client):
+    """The full path: authenticated, metered, routed to primary, and reconciled."""
     response = await complete(client)
     assert response.status_code == 200
     body = response.json()
@@ -84,11 +85,13 @@ async def test_request_under_the_limit_succeeds(client):
 
 
 async def test_many_requests_under_the_limit_all_succeed(client):
+    """Fifty sequential requests inside the budget are all served."""
     for _ in range(50):
         assert (await complete(client, max_tokens=64)).status_code == 200
 
 
 async def test_request_over_the_limit_gets_a_clean_error(client, gateway):
+    """Exceeding the budget yields the standard error shape with the limit and a retry hint, not an exception."""
     gateway.state.test_limiter.try_consume("tenant-acme", 49_990)
     response = await complete(client, prompt="x" * 100, max_tokens=1_000)
     assert response.status_code == 429
@@ -98,6 +101,7 @@ async def test_request_over_the_limit_gets_a_clean_error(client, gateway):
 
 
 async def test_exactly_the_limit_is_allowed_and_the_next_token_is_not(client, gateway, providers):
+    """The boundary asserted end to end, with reconciliation neutralised so the arithmetic is exact."""
     primary, _ = providers
     limiter = gateway.state.test_limiter
     prompt = "x" * 400                        # 100 prompt tokens
@@ -116,12 +120,14 @@ async def test_exactly_the_limit_is_allowed_and_the_next_token_is_not(client, ga
 
 
 async def test_tenants_do_not_affect_each_other(client, gateway):
+    """One tenant at its limit does not block another's traffic."""
     gateway.state.test_limiter.try_consume("tenant-acme", 50_000)
     assert (await complete(client, key="key-acme")).status_code == 429
     assert (await complete(client, key="key-globex")).status_code == 200
 
 
 async def test_window_eviction_lets_a_blocked_tenant_back_in(client, gateway, clock):
+    """A blocked tenant is served again once its usage ages out."""
     gateway.state.test_limiter.try_consume("tenant-acme", 50_000)
     assert (await complete(client)).status_code == 429
     clock.advance(61)
@@ -129,6 +135,7 @@ async def test_window_eviction_lets_a_blocked_tenant_back_in(client, gateway, cl
 
 
 async def test_usage_is_reconciled_to_the_actual_token_count(client, gateway):
+    """The window reflects the provider's reported cost, not the up-front estimate."""
     prompt = "x" * 400
     estimated = estimate_tokens(prompt, 4_000)
     response = await complete(client, prompt=prompt, max_tokens=4_000)
@@ -140,6 +147,7 @@ async def test_usage_is_reconciled_to_the_actual_token_count(client, gateway):
 
 
 async def test_budget_is_released_when_both_providers_fail(client, gateway, providers):
+    """A tenant is not charged for the gateway's own outage."""
     primary, secondary = providers
     primary.error = ProviderTimeout("primary", "deadline")
     secondary.error = ProviderTimeout("secondary", "deadline")
@@ -149,6 +157,7 @@ async def test_budget_is_released_when_both_providers_fail(client, gateway, prov
 
 
 async def test_rate_limit_rejection_never_reaches_a_provider(client, gateway, providers):
+    """A throttled request costs nothing upstream, which is the point of admission control."""
     primary, _ = providers
     gateway.state.test_limiter.try_consume("tenant-acme", 50_000)
     assert (await complete(client)).status_code == 429
@@ -159,6 +168,7 @@ async def test_rate_limit_rejection_never_reaches_a_provider(client, gateway, pr
 # Failover, end to end
 # --------------------------------------------------------------------------
 async def test_primary_429_fails_over_and_the_client_still_succeeds(client, providers):
+    """Failover is invisible to the client except for the reported provider."""
     primary, secondary = providers
     primary.error = ProviderRateLimited("primary", "429 upstream")
     response = await complete(client)
@@ -170,6 +180,7 @@ async def test_primary_429_fails_over_and_the_client_still_succeeds(client, prov
 
 
 async def test_primary_timeout_fails_over(client, providers):
+    """The timeout path reaches the client as a success from the secondary."""
     primary, _ = providers
     primary.error = ProviderTimeout("primary", "read timeout")
     body = (await complete(client)).json()
@@ -177,6 +188,7 @@ async def test_primary_timeout_fails_over(client, providers):
 
 
 async def test_primary_success_means_the_secondary_is_never_called(client, providers):
+    """Five successful requests leave the secondary's call count at zero."""
     _, secondary = providers
     for _ in range(5):
         assert (await complete(client)).status_code == 200
@@ -184,6 +196,7 @@ async def test_primary_success_means_the_secondary_is_never_called(client, provi
 
 
 async def test_both_down_gives_one_sanitized_error(client, providers):
+    """One error, the standard shape, with the planted upstream secrets absent."""
     primary, secondary = providers
     primary.error = ProviderRateLimited("primary", fake_upstream.LEAKY_ERROR_BODY)
     secondary.error = ProviderTimeout("secondary", fake_upstream.LEAKY_ERROR_BODY)
@@ -198,12 +211,14 @@ async def test_both_down_gives_one_sanitized_error(client, providers):
 # Error shape consistency
 # --------------------------------------------------------------------------
 async def test_missing_api_key(client):
+    """No key is a 401 in the same error shape as every other failure."""
     response = await complete(client, key=None)
     assert response.status_code == 401
     assert_standard_error(response, "unauthenticated")
 
 
 async def test_unknown_api_key(client):
+    """An unrecognised key is refused identically to no key, revealing nothing about which keys exist."""
     response = await complete(client, key="key-not-real")
     assert response.status_code == 401
     assert_standard_error(response, "unauthenticated")
@@ -221,6 +236,7 @@ async def test_unknown_api_key(client):
     ],
 )
 async def test_invalid_requests_use_the_same_error_shape(client, payload):
+    """Six malformed bodies, all returning the one standard shape rather than FastAPI's default."""
     response = await client.post("/v1/complete", json=payload, headers={"X-API-Key": "key-acme"})
     assert response.status_code == 400
     assert_standard_error(response, "invalid_request")
@@ -245,6 +261,7 @@ async def test_every_error_path_shares_one_shape(client, gateway, providers):
 
 
 async def test_unexpected_internal_exception_is_sanitized(client, providers):
+    """A bug becomes a bare 500 whose body carries no exception type, password or hostname."""
     primary, secondary = providers
     primary.error = RuntimeError("DB_PASSWORD=hunter2 host=vault.internal")
     response = await complete(client)

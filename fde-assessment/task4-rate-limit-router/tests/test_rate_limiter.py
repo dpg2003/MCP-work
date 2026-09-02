@@ -13,12 +13,14 @@ from rate_limiter import DEFAULT_LIMIT_TOKENS, RateLimiter
 # Budget
 # --------------------------------------------------------------------------
 def test_requests_under_the_budget_all_succeed(limiter):
+    """Ten admissions inside the budget, with the window totalling exactly what was consumed."""
     for _ in range(10):
         assert limiter.try_consume("acme", 4_000).allowed
     assert limiter.usage("acme") == 40_000
 
 
 def test_request_that_pushes_over_the_budget_is_rejected(limiter):
+    """A rejection reports the usage and limit, and crucially records nothing."""
     assert limiter.try_consume("acme", 49_000).allowed
     decision = limiter.try_consume("acme", 2_000)
     assert not decision.allowed
@@ -30,17 +32,20 @@ def test_request_that_pushes_over_the_budget_is_rejected(limiter):
 
 
 def test_exactly_the_limit_is_allowed_and_one_more_is_not(limiter):
+    """The stated boundary: 50,000 passes, one more token does not."""
     assert limiter.try_consume("acme", 50_000).allowed
     assert limiter.usage("acme") == 50_000
     assert not limiter.try_consume("acme", 1).allowed
 
 
 def test_a_single_request_of_50001_is_rejected(limiter):
+    """A request larger than the whole budget is refused on its own, not partially admitted."""
     assert not limiter.try_consume("acme", 50_001).allowed
     assert limiter.usage("acme") == 0
 
 
 def test_incremental_fill_to_the_exact_boundary(limiter):
+    """Reaching the limit in five steps behaves the same as reaching it in one."""
     for _ in range(5):
         assert limiter.try_consume("acme", 10_000).allowed
     assert limiter.usage("acme") == 50_000
@@ -48,11 +53,13 @@ def test_incremental_fill_to_the_exact_boundary(limiter):
 
 
 def test_zero_token_request_is_allowed_at_the_limit(limiter):
+    """A zero-cost request is admissible even at the limit, since it consumes nothing."""
     limiter.try_consume("acme", 50_000)
     assert limiter.try_consume("acme", 0).allowed
 
 
 def test_negative_tokens_rejected(limiter):
+    """A negative cost would refund budget through the admission path and is refused outright."""
     with pytest.raises(ValueError):
         limiter.try_consume("acme", -1)
 
@@ -61,6 +68,7 @@ def test_negative_tokens_rejected(limiter):
 # Sliding window
 # --------------------------------------------------------------------------
 def test_old_usage_is_evicted_when_the_window_slides(limiter, clock):
+    """Past the window, a fully exhausted tenant regains its whole budget."""
     assert limiter.try_consume("acme", 50_000).allowed
     assert not limiter.try_consume("acme", 1).allowed
 
@@ -84,6 +92,7 @@ def test_window_is_sliding_not_fixed(limiter, clock):
 
 
 def test_boundary_of_the_window_is_exclusive(limiter, clock):
+    """Exactly one window later the entry is gone, fixing the eviction boundary."""
     limiter.try_consume("acme", 50_000)
     clock.advance(60.0)  # exactly one window later: the entry is evicted
     assert limiter.usage("acme") == 0
@@ -91,12 +100,14 @@ def test_boundary_of_the_window_is_exclusive(limiter, clock):
 
 
 def test_just_inside_the_window_still_counts(limiter, clock):
+    """A hair inside the window still counts, fixing the boundary from the other side."""
     limiter.try_consume("acme", 50_000)
     clock.advance(59.9)
     assert not limiter.try_consume("acme", 1).allowed
 
 
 def test_expired_rows_are_actually_deleted_not_just_ignored(limiter, clock):
+    """Eviction physically removes rows rather than filtering them, so the table cannot grow without bound."""
     for _ in range(20):
         limiter.try_consume("acme", 100)
     assert limiter.row_count() == 20
@@ -106,6 +117,7 @@ def test_expired_rows_are_actually_deleted_not_just_ignored(limiter, clock):
 
 
 def test_retry_after_points_at_when_capacity_frees_up(limiter, clock):
+    """The retry hint is computed from when enough usage actually ages out, not a fixed guess."""
     limiter.try_consume("acme", 30_000)
     clock.advance(10)
     limiter.try_consume("acme", 20_000)
@@ -119,6 +131,7 @@ def test_retry_after_points_at_when_capacity_frees_up(limiter, clock):
 # Tenant isolation
 # --------------------------------------------------------------------------
 def test_tenants_have_independent_budgets(limiter):
+    """One tenant exhausting its budget leaves another's untouched."""
     assert limiter.try_consume("acme", 50_000).allowed
     assert not limiter.try_consume("acme", 1).allowed
     # Globex is untouched.
@@ -128,6 +141,7 @@ def test_tenants_have_independent_budgets(limiter):
 
 
 def test_one_tenant_exhausting_the_window_does_not_evict_another(limiter, clock):
+    """Eviction is global housekeeping but must never drop a different tenant's live usage."""
     limiter.try_consume("acme", 40_000)
     limiter.try_consume("globex", 40_000)
     clock.advance(30)
@@ -141,6 +155,7 @@ def test_one_tenant_exhausting_the_window_does_not_evict_another(limiter, clock)
 # Persistence across process restarts
 # --------------------------------------------------------------------------
 def test_state_survives_a_restart(db_path, clock):
+    """A fresh limiter object on the same file enforces against the usage already recorded."""
     first = RateLimiter(db_path=db_path, clock=clock)
     assert first.try_consume("acme", 45_000).allowed
     first.close()
@@ -187,6 +202,7 @@ def test_state_survives_a_real_subprocess_restart(db_path):
 
 
 def test_persisted_entries_still_expire_after_a_restart(db_path, clock):
+    """Persistence does not freeze the clock: restored entries still age out normally."""
     first = RateLimiter(db_path=db_path, clock=clock)
     first.try_consume("acme", 50_000)
     first.close()
@@ -264,6 +280,7 @@ def test_independent_limiter_instances_share_one_budget(db_path):
 # Reconciliation
 # --------------------------------------------------------------------------
 def test_reconcile_corrects_an_over_estimate(limiter):
+    """The reservation is corrected down to the real cost once the provider answers."""
     decision = limiter.try_consume("acme", 10_000)
     assert limiter.usage("acme") == 10_000
     limiter.reconcile(decision.reservation_id, 1_200)
@@ -271,12 +288,14 @@ def test_reconcile_corrects_an_over_estimate(limiter):
 
 
 def test_release_gives_the_whole_reservation_back(limiter):
+    """A request that produced nothing returns its entire reservation to the budget."""
     decision = limiter.try_consume("acme", 10_000)
     limiter.release(decision.reservation_id)
     assert limiter.usage("acme") == 0
 
 
 def test_reconcile_does_not_disturb_other_rows(limiter):
+    """Correcting one reservation leaves every other row untouched."""
     first = limiter.try_consume("acme", 10_000)
     limiter.try_consume("acme", 10_000)
     limiter.reconcile(first.reservation_id, 0)

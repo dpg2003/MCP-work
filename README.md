@@ -31,8 +31,8 @@ Extra arguments pass through to pytest (`./run_tests.sh -x -k redact`).
 ```
 ===== documentation coverage =====
 source           183/ 183 (100.0%)  [enforced]
-test support      97/  97 (100.0%)  [enforced]
-test functions    65/ 243 ( 26.7%)  [reported]
+test support     103/ 103 (100.0%)  [enforced]
+test functions   256/ 256 (100.0%)  [enforced]
 documentation check passed
 ===== task1-mcp-server =====        54 passed
 ===== task2-security-gateway =====  84 passed
@@ -353,14 +353,16 @@ only when someone tries to use it. It runs as part of `./run_tests.sh`.
 
 `tools/check_docs.py` enforces it, and `./run_tests.sh` runs it:
 
-- **Source code: 100% required.** Every module, class, function, method and
-  property. A gap fails the check.
-- **Test support: 100% required.** Fixtures and helpers describe plumbing, not
-  behaviour, so their names are not self-explanatory.
-- **Test functions: reported, not required.** A well-named test is its own
-  specification — `test_exactly_the_limit_is_allowed_and_one_more_is_not` needs
-  no prose, and a docstring restating the function name is noise. Docstrings
-  are present on the ~37 tests whose intent is not obvious from the name.
+- **Source code: 100%.** Every module, class, function, method and property.
+- **Test support: 100%.** Fixtures and helpers describe plumbing, so their names
+  are not self-explanatory.
+- **Test functions: 100%.** Every one carries a docstring, and the bar is that it
+  says something the *name* does not — why the case matters, where the boundary
+  is, which failure it guards against. A docstring that only restates the
+  function name would be noise, so each adds rationale rather than repeating the
+  identifier.
+
+All three are enforced; a gap fails `./run_tests.sh`.
 
 Comments throughout explain *why*, not *what*: the reasoning behind a
 tradeoff, the attack a check defends against, the failure mode a line prevents.

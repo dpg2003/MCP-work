@@ -120,16 +120,13 @@ def main(argv: list[str]) -> int:
 
     source, support, tests = check(root)
     for report in (source, support, tests):
-        enforced = report is not tests
         print(
             f"{report.label:15} {report.documented:4}/{report.total:4} "
-            f"({report.percent:5.1f}%){'  [enforced]' if enforced else '  [reported]'}"
+            f"({report.percent:5.1f}%)  [enforced]"
         )
 
-    failures = [r for r in (source, support) if r.gaps]
+    failures = [r for r in (source, support, tests) if r.gaps]
     if not failures:
-        if tests.gaps:
-            print(f"\n{len(tests.gaps)} test functions rely on their name alone (allowed).")
         print("\ndocumentation check passed")
         return 0
 

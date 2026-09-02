@@ -34,6 +34,7 @@ async def collect(provider, prompt: str = "hello", **kwargs) -> str:
 # Streaming redaction end to end
 # --------------------------------------------------------------------------
 async def test_split_pii_is_redacted_over_http():
+    """The end-to-end proof over real HTTP, with near-miss text preserved alongside the redactions."""
     provider = MockProvider(
         chunks=[
             "Her email is john.doe@exam",
@@ -71,12 +72,14 @@ async def test_response_is_chunked_not_one_blob():
 
 
 async def test_healthz():
+    """The liveness probe answers and names the active provider."""
     async with build_client(MockProvider(chunks=["hi"])) as client:
         response = await client.get("/healthz")
     assert response.json()["status"] == "ok"
 
 
 async def test_empty_prompt_is_rejected():
+    """An empty prompt is a validation failure, not a request to the provider."""
     async with build_client(MockProvider(chunks=["hi"])) as client:
         response = await client.post("/v1/generate", json={"prompt": ""})
     assert response.status_code == 422
@@ -136,6 +139,7 @@ async def test_ttft_is_not_delayed_by_the_hold_back_window():
 # Upstream failures
 # --------------------------------------------------------------------------
 async def test_upstream_drops_mid_stream_closes_cleanly_with_an_error():
+    """A mid-stream failure ends with a sentinel and a closed connection rather than a hang, carrying none of the upstream's words."""
     provider = MockProvider(
         chunks=["Some safe text. ", "More safe text. "],
         fail_after=2,
@@ -161,6 +165,7 @@ async def test_partial_pii_in_the_tail_is_redacted_even_when_upstream_dies():
 
 
 async def test_undecodable_upstream_event_is_handled():
+    """A corrupt provider frame stops the stream cleanly; text after the bad frame is never emitted."""
     provider = SSEMockProvider(
         frames=[
             'data: {"type":"content_block_delta","delta":{"text":"Hello "}}',
@@ -174,6 +179,7 @@ async def test_undecodable_upstream_event_is_handled():
 
 
 async def test_sse_provider_happy_path_redacts():
+    """The SSE parsing path redacts identically to the plain one, including across frames."""
     provider = SSEMockProvider(
         frames=[
             'data: {"type":"content_block_delta","delta":{"text":"ssn 123-"}}',
@@ -185,6 +191,7 @@ async def test_sse_provider_happy_path_redacts():
 
 
 async def test_unexpected_provider_exception_is_sanitized():
+    """An unexpected exception type is caught too, and its message, which carries a password and hostname, does not reach the client."""
     provider = MockProvider(
         chunks=["safe "],
         fail_after=1,
@@ -197,6 +204,7 @@ async def test_unexpected_provider_exception_is_sanitized():
 
 
 async def test_provider_unavailable_before_any_bytes_gives_a_502():
+    """Failing before the first byte still allows a real status code, so this path returns 502 rather than a sentinel."""
     class DeadProvider:
         """A provider that fails before yielding any bytes at all."""
 
@@ -215,6 +223,7 @@ async def test_provider_unavailable_before_any_bytes_gives_a_502():
 # Memory over HTTP
 # --------------------------------------------------------------------------
 async def test_long_stream_keeps_gateway_memory_bounded():
+    """A quarter-megabyte response streams through without the gateway accumulating it."""
     chunk_count = 5_000
     provider = MockProvider(
         chunks=[f"line {index}: the quick brown fox jumps over the lazy dog. " for index in range(chunk_count)]

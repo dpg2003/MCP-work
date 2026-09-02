@@ -51,6 +51,7 @@ async def test_liveness_is_cheap_and_dependency_free(ops_client):
 
 
 async def test_readiness_reports_the_database_check(ops_client):
+    """Readiness names the dependency it checked, so an operator can tell what passed."""
     response = await ops_client.get("/readyz")
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "checks": {"rate_limit_db": "ok"}}
@@ -120,6 +121,7 @@ async def test_shutdown_drains_the_admission_workers(db_path, clock):
 
 
 async def test_shutdown_is_safe_with_no_traffic(db_path, clock):
+    """Lifespan exit on an idle app is a no-op rather than an error on an unstarted worker."""
     limiter = RateLimiter(db_path=db_path, clock=clock)
     application = app_module.create_app(limiter=limiter, api_keys=dict(API_KEYS))
     try:

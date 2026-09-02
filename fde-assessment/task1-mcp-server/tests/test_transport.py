@@ -73,6 +73,7 @@ def test_stdout_contains_only_jsonrpc_under_mixed_traffic(client):
 
 
 def test_logging_goes_to_stderr_not_stdout(client):
+    """Log records must be visible on stderr and completely absent from stdout, which is the protocol channel."""
     client.call_tool("get_customer_record", {"customer_id": VALID_ID})
     time.sleep(0.3)
     assert any("tools/call" in line for line in client.stderr_lines), client.stderr_lines
@@ -96,6 +97,7 @@ def test_startup_banner_never_reaches_stdout(raw_client):
 # malformed envelopes
 # --------------------------------------------------------------------------
 def test_invalid_json_gets_parse_error_and_server_survives(client):
+    """An undecodable frame is answered with -32700 and a null id, and the connection keeps serving afterwards."""
     client.send_raw("<<<not json at all>>>")
     response = client.wait_for_null_id()
     assert response["error"]["code"] == PARSE_ERROR
@@ -107,6 +109,7 @@ def test_invalid_json_gets_parse_error_and_server_survives(client):
 
 
 def test_missing_jsonrpc_field_is_invalid_request(client):
+    """Valid JSON in the wrong shape is -32600, with the id echoed back so the client can correlate it."""
     client.send_raw('{"id": 77, "method": "tools/list"}')
     response = client.wait_for(77)
     assert response["error"]["code"] == INVALID_REQUEST
@@ -136,6 +139,7 @@ def test_missing_id_on_a_request_is_treated_as_a_notification_not_a_crash(client
     ],
 )
 def test_structurally_invalid_frames_get_an_error_and_do_not_kill_the_server(client, frame):
+    """Six malformed envelopes, each of which must leave the server answering and stdout clean."""
     client.send_raw(frame)
     time.sleep(0.3)
     # Some of these carry a recoverable id, some do not; either way the server
@@ -147,11 +151,13 @@ def test_structurally_invalid_frames_get_an_error_and_do_not_kill_the_server(cli
 
 
 def test_unknown_method_is_method_not_found(client):
+    """A method the server does not implement is -32601, which is how clients probe for capabilities."""
     response = client.request("resources/read", {"uri": "file:///etc/passwd"})
     assert response["error"]["code"] == METHOD_NOT_FOUND
 
 
 def test_server_does_not_hang_on_a_flood_of_garbage(client):
+    """Fifty consecutive bad frames must not wedge the read loop; a valid request afterwards still gets served."""
     for index in range(50):
         client.send_raw(f"garbage frame {index} }}{{")
     ok = client.call_tool("get_customer_record", {"customer_id": VALID_ID}, timeout=15)
@@ -222,6 +228,7 @@ def test_rapid_fire_requests_do_not_interleave_or_corrupt_frames(client):
 
 
 def test_concurrent_refunds_all_get_unique_ids(client):
+    """Twenty-five pipelined refunds allocate twenty-five distinct ids, proving the datastore lock actually serialises them."""
     ids = []
     for index in range(25):
         ids.append(client.next_id())

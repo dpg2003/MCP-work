@@ -53,6 +53,7 @@ def set_mode(which: str, mode: str, latency: float = 0.0) -> None:
 # Happy path
 # --------------------------------------------------------------------------
 async def test_primary_success_never_calls_the_secondary(http_router):
+    """A healthy primary means the secondary is untouched, asserted by call count on both sides."""
     routed = await http_router.complete("hello", 32)
     assert routed.provider_used == "primary"
     assert routed.failed_over is False
@@ -64,6 +65,7 @@ async def test_primary_success_never_calls_the_secondary(http_router):
 # Failover triggers
 # --------------------------------------------------------------------------
 async def test_primary_429_triggers_failover(http_router):
+    """A rate-limited primary fails over and the client still gets a real answer."""
     set_mode("primary", "429")
     routed = await http_router.complete("hello", 32)
     assert routed.provider_used == "secondary"
@@ -74,6 +76,7 @@ async def test_primary_429_triggers_failover(http_router):
 
 
 async def test_primary_timeout_triggers_failover(http_router):
+    """A hung primary is abandoned at the deadline and the secondary serves the request."""
     set_mode("primary", "hang")
     routed = await asyncio.wait_for(http_router.complete("hello", 32), timeout=10)
     assert routed.provider_used == "secondary"
@@ -81,6 +84,7 @@ async def test_primary_timeout_triggers_failover(http_router):
 
 
 async def test_primary_500_triggers_failover(http_router):
+    """A server error is failover-worthy for the same reason a timeout is."""
     set_mode("primary", "500")
     routed = await http_router.complete("hello", 32)
     assert routed.provider_used == "secondary"
@@ -88,12 +92,14 @@ async def test_primary_500_triggers_failover(http_router):
 
 
 async def test_primary_undecodable_body_triggers_failover(http_router):
+    """A response that cannot be parsed is a failed provider, not a failed request."""
     set_mode("primary", "garbage")
     routed = await http_router.complete("hello", 32)
     assert routed.provider_used == "secondary"
 
 
 async def test_connection_error_triggers_failover():
+    """A refused connection fails over too; a router that handles timeouts but not refusals has a hole in it."""
     primary = StubProvider("primary", error=ProviderUnavailable("primary", "connect refused"))
     secondary = StubProvider("secondary", text="from-secondary")
     routed = await ModelRouter(primary, secondary).complete("hi", 8)
@@ -113,12 +119,14 @@ async def test_non_retryable_4xx_does_not_fail_over(http_router):
 # Timeout precision
 # --------------------------------------------------------------------------
 def test_default_timeout_is_3000ms():
+    """The shipped deadline is the documented one, independent of what any test overrides."""
     assert DEFAULT_TIMEOUT_MS == 3000
     router = ModelRouter(StubProvider("p"), StubProvider("s"))
     assert router.timeout_ms == 3000
 
 
 async def test_router_pushes_its_deadline_down_into_http_providers(upstream_url):
+    """The deadline is enforced in the provider so it covers connect and read, not just the awaited coroutine."""
     async with httpx.AsyncClient(base_url=upstream_url) as client:
         primary = HttpModelProvider("primary", f"{upstream_url}/primary/v1/complete", client)
         secondary = HttpModelProvider("secondary", f"{upstream_url}/secondary/v1/complete", client)
@@ -152,6 +160,7 @@ async def test_timeout_is_not_flaky_across_repeats(http_router):
 
 
 async def test_timeout_returns_promptly_rather_than_waiting_out_the_upstream(http_router):
+    """Failover happens at the deadline rather than when the upstream eventually gives up."""
     set_mode("primary", "hang")
     start = time.perf_counter()
     await http_router.complete("hello", 32)
@@ -163,6 +172,7 @@ async def test_timeout_returns_promptly_rather_than_waiting_out_the_upstream(htt
 # Both providers down
 # --------------------------------------------------------------------------
 async def test_both_providers_failing_gives_one_standardized_error(http_router):
+    """Two different failures collapse into a single error in the gateway's own shape, with the attempt trail preserved."""
     set_mode("primary", "429")
     set_mode("secondary", "500")
     with pytest.raises(GatewayError) as raised:
@@ -176,6 +186,7 @@ async def test_both_providers_failing_gives_one_standardized_error(http_router):
 
 
 async def test_both_providers_timing_out_gives_the_same_shape(http_router):
+    """The shape does not vary with the kind of failure."""
     set_mode("primary", "hang")
     set_mode("secondary", "hang")
     with pytest.raises(GatewayError) as raised:
@@ -187,6 +198,7 @@ async def test_both_providers_timing_out_gives_the_same_shape(http_router):
 
 
 async def test_no_upstream_detail_leaks_from_either_provider(http_router):
+    """Six planted secrets, from either provider, must all be absent from the client-facing payload."""
     set_mode("primary", "429")
     set_mode("secondary", "500")
     with pytest.raises(GatewayError) as raised:
@@ -215,6 +227,7 @@ async def test_rapid_flapping_never_wedges_the_router(http_router):
 
 
 async def test_flapping_does_not_leak_connections(upstream_url):
+    """A hundred and fifty failovers reuse pooled sockets rather than accumulating them, and the router keeps no growing state."""
     async with httpx.AsyncClient(base_url=upstream_url) as client:
         router = ModelRouter(
             HttpModelProvider("primary", f"{upstream_url}/primary/v1/complete", client),
@@ -233,6 +246,7 @@ async def test_flapping_does_not_leak_connections(upstream_url):
 
 
 async def test_concurrent_requests_during_a_flap_all_resolve():
+    """Fifty concurrent requests against an intermittently failing primary all resolve to a real answer."""
     primary = StubProvider("primary", delay_seconds=0.01)
     secondary = StubProvider("secondary", text="backup")
     router = ModelRouter(primary, secondary, timeout_ms=1000)
