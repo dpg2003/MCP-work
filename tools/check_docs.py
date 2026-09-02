@@ -22,7 +22,11 @@ documentation, and the class docstring says which protocol.
 
 Usage::
 
-    python tools/check_docs.py [root]      # default root: fde-assessment
+    python tools/check_docs.py [root]
+
+``root`` defaults to the ``fde-assessment`` directory next to this script, so the
+checker works from any working directory rather than only from the repository
+root.
 """
 
 from __future__ import annotations
@@ -101,9 +105,15 @@ def check(root: Path) -> tuple[Report, Report, Report]:
     return source, support, tests
 
 
+# The assessment lives next to this script's parent directory. Deriving it from
+# __file__ rather than the working directory means `python tools/check_docs.py`
+# behaves the same wherever it is invoked from.
+DEFAULT_ROOT = Path(__file__).resolve().parent.parent / "fde-assessment"
+
+
 def main(argv: list[str]) -> int:
     """Print the report and exit non-zero if an enforced category has gaps."""
-    root = Path(argv[1] if len(argv) > 1 else "fde-assessment")
+    root = Path(argv[1]) if len(argv) > 1 else DEFAULT_ROOT
     if not root.is_dir():
         print(f"no such directory: {root}", file=sys.stderr)
         return 2

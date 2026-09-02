@@ -1,6 +1,9 @@
 """Throughput and event-loop-blocking benchmark for the rate limiter."""
 import asyncio, sys, pathlib, tempfile, time, statistics
-sys.path.insert(0, str(pathlib.Path("fde-assessment/task4-rate-limit-router").resolve()))
+# Resolve the project from this file, not the working directory, so the
+# benchmark runs correctly from anywhere.
+PROJECT = pathlib.Path(__file__).resolve().parent.parent / "fde-assessment" / "task4-rate-limit-router"
+sys.path.insert(0, str(PROJECT))
 from rate_limiter import RateLimiter
 
 def sync_throughput(n=3000):

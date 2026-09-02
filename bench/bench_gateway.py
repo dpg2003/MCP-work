@@ -1,6 +1,8 @@
 """End-to-end gateway benchmark: throughput, latency, and event-loop health."""
 import asyncio, sys, pathlib, tempfile, time, statistics
-ROOT = pathlib.Path("fde-assessment/task4-rate-limit-router").resolve()
+# Resolve the project from this file, not the working directory, so the
+# benchmark runs correctly from anywhere.
+ROOT = pathlib.Path(__file__).resolve().parent.parent / "fde-assessment" / "task4-rate-limit-router"
 sys.path.insert(0, str(ROOT))
 import httpx
 from app import create_app

@@ -1,6 +1,9 @@
 """Throughput benchmark for the streaming redactor."""
 import sys, time, pathlib
-sys.path.insert(0, str(pathlib.Path("fde-assessment/task3-pii-redaction-gateway").resolve()))
+# Resolve the project from this file, not the working directory, so the
+# benchmark runs correctly from anywhere.
+PROJECT = pathlib.Path(__file__).resolve().parent.parent / "fde-assessment" / "task3-pii-redaction-gateway"
+sys.path.insert(0, str(PROJECT))
 from redactor import StreamRedactor
 
 PROSE = "The quick brown fox jumps over the lazy dog and keeps running onward. "

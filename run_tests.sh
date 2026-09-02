@@ -14,6 +14,6 @@ if [ ! -x "$venv/bin/python" ]; then
 fi
 
 echo "===== documentation coverage ====="
-"$venv/bin/python" "$here/tools/check_docs.py" || exit 1
+"$venv/bin/python" "$here/tools/check_docs.py" "$here/fde-assessment" || exit 1
 
 PYTHON="$venv/bin/python" "$here/fde-assessment/run_all_tests.sh" "$@"
