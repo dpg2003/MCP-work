@@ -130,6 +130,12 @@
     },
 
     {
+      "label": "Assessment: run the 54-case matrix",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python tools/assessment/run_matrix.py",
+      "problemMatcher": []
+    },
+    {
       "label": "Demo: end-to-end walkthrough of all four",
       "type": "shell",
       "command": "./tools/demo.sh",

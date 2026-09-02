@@ -33,6 +33,7 @@ finishes, everything below works.
 | Tests: Task 4 — rate limit router | 100 tests |
 | Benchmarks: run all | Prints throughput and latency numbers |
 | Docs: coverage check | Enforces 100% documentation on source |
+| **Assessment: run the 54-case matrix** | Runs every case from the assessment test-case document and writes `ASSESSMENT_RESULTS.md` |
 
 *Tests: ALL* is the default test task, so <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>
 → *Tasks: Run Test Task* runs it directly.
@@ -43,6 +44,22 @@ default; change `python.testing.cwd` in `.vscode/settings.json` to explore
 another, or just use the tasks above, which run each in its own process.
 
 ---
+
+## Reproduce the assessment scorecard
+
+**Tasks: Run Task → Assessment: run the 54-case matrix**, or:
+
+```bash
+python tools/assessment/run_matrix.py
+```
+
+This executes all 54 cases from the assessment test-case document against the
+real implementations — the MCP server as a subprocess over a real pipe, the HTTP
+services on real sockets, the timeout cases with real wall-clock latency — and
+writes the filled-in table to [`ASSESSMENT_RESULTS.md`](ASSESSMENT_RESULTS.md).
+It exits non-zero if any case fails, so it is safe to run in CI.
+
+Current result: **54 / 54 passed**.
 
 ## See it actually work
 

@@ -17,6 +17,7 @@ fi
 
 echo "===== documentation coverage ====="
 "$venv/bin/python" "$here/tools/check_docs.py" "$here/fde-assessment" || exit 1
+"$venv/bin/python" "$here/tools/check_docs.py" "$here/tools" || exit 1
 
 echo
 echo "===== editor / MCP configuration ====="

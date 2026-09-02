@@ -20,6 +20,7 @@ From a terminal:
 ./setup.sh           # create .venv and install all four projects' dependencies
 ./run_tests.sh       # doc check + config check + all four test suites
 ./tools/demo.sh      # end-to-end walkthrough of all four services
+python tools/assessment/run_matrix.py   # the 54-case assessment scorecard
 ./bench/run_all.sh   # optional: reproduce the performance numbers
 ```
 
@@ -42,6 +43,10 @@ all suites passed
 ```
 
 **491 tests, no network access and no API key required.**
+
+Separately, [`ASSESSMENT_RESULTS.md`](ASSESSMENT_RESULTS.md) is the assessment
+test-case document filled in by measurement rather than by hand — all **54 of 54
+cases pass**. Regenerate it with `python tools/assessment/run_matrix.py`.
 
 ### Running one project
 

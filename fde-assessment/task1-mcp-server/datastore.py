@@ -60,6 +60,9 @@ class Customer:
 
 
 _SEED: list[Customer] = [
+    # CUST-12345 is the canonical example used throughout the assessment
+    # documentation, so it is seeded first and kept stable.
+    Customer("CUST-12345", "Alan Turing", "alan@example.com", "enterprise", 31500.00, "2020-06-23T11:00:00Z", 2),
     Customer("CUST-A1B2C", "Ada Lovelace", "ada@example.com", "enterprise", 48250.00, "2021-03-14T09:00:00Z", 1),
     Customer("CUST-99999", "Grace Hopper", "grace@example.com", "pro", 12300.50, "2022-07-01T13:30:00Z", 0),
     Customer("CUST-zz001", "Seymour Cray", "seymour@example.com", "starter", 480.00, "2024-01-09T17:45:00Z", 3),
