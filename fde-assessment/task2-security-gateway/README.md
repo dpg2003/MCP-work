@@ -149,6 +149,22 @@ error — which is what an MCP client is actually equipped to parse.
   assert that a planted stack trace, password, and internal hostname all fail to
   appear in the client-facing response.
 
+## Production hardening
+
+- **Request body cap** (`GATEWAY_MAX_BODY_BYTES`, default 1 MiB). `Content-Length`
+  is rejected up front so an oversized request costs nothing, *and* the streamed
+  read is capped independently — a chunked request has no length header and a
+  malicious one can understate it. Over the cap returns HTTP 413 with a JSON-RPC
+  error, before authentication and without touching the downstream server.
+- **Batch size cap** (`GATEWAY_MAX_BATCH_SIZE`, default 100). Authorization is
+  per message, so an unbounded batch is unbounded work for a single request.
+- **Bounded downstream pool** (`GATEWAY_MAX_CONNECTIONS` / `GATEWAY_MAX_KEEPALIVE`,
+  default 100/20), so a burst surfaces as queuing rather than exhausting file
+  descriptors.
+
+`tests/test_hardening.py` covers each cap at, just under, and just over the
+limit, and asserts the downstream call count stays at zero for every rejection.
+
 ## Key design tradeoff
 
 I authorize on the *parsed JSON-RPC envelope* rather than on the raw body, and I

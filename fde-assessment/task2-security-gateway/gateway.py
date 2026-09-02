@@ -68,6 +68,18 @@ ADMIN_TOOL_PREFIX = "admin_"
 REQUIRE_AUTH_FOR_LIST = False
 UNAUTHENTICATED_METHODS = frozenset({"tools/list"})
 
+# Resource limits. Without these the gateway will happily buffer an arbitrarily
+# large body into memory and authorize an arbitrarily long batch -- one
+# unauthenticated request is then enough to exhaust a worker.
+MAX_BODY_BYTES = int(os.environ.get("GATEWAY_MAX_BODY_BYTES", 1024 * 1024))
+MAX_BATCH_SIZE = int(os.environ.get("GATEWAY_MAX_BATCH_SIZE", 100))
+
+# Bound the downstream connection pool so a burst cannot exhaust file
+# descriptors, and so backpressure surfaces as queuing rather than collapse.
+MAX_DOWNSTREAM_CONNECTIONS = int(os.environ.get("GATEWAY_MAX_CONNECTIONS", 100))
+MAX_KEEPALIVE_CONNECTIONS = int(os.environ.get("GATEWAY_MAX_KEEPALIVE", 20))
+
+PAYLOAD_TOO_LARGE = -32600
 PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 INVALID_PARAMS = -32602
@@ -120,6 +132,40 @@ def _is_privileged(tool_name: str) -> bool:
 # --------------------------------------------------------------------------
 # Authorization
 # --------------------------------------------------------------------------
+class BodyTooLarge(Exception):
+    """The request body exceeded :data:`MAX_BODY_BYTES`."""
+
+
+async def read_capped_body(request: Request, limit: int = MAX_BODY_BYTES) -> bytes:
+    """Read the body, refusing to buffer more than ``limit`` bytes.
+
+    Two checks, because either alone is insufficient. The ``Content-Length``
+    header is rejected up front so an oversized request costs nothing, but a
+    chunked request has no such header and a malicious one can understate it --
+    so the streamed read is capped independently and stops the moment the cap is
+    passed, rather than after the whole body has been buffered.
+
+    Raises:
+        BodyTooLarge: The body is, or claims to be, larger than ``limit``.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > limit:
+                raise BodyTooLarge(declared)
+        except ValueError:
+            raise BodyTooLarge("invalid content-length") from None
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise BodyTooLarge(str(size))
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 class Denied(Exception):
     """A per-message authorization decision to deny."""
 
@@ -189,6 +235,8 @@ def create_app(
     downstream_url: str | None = None,
     client: httpx.AsyncClient | None = None,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_body_bytes: int = MAX_BODY_BYTES,
+    max_batch_size: int = MAX_BATCH_SIZE,
 ) -> FastAPI:
     """Build the gateway.
 
@@ -199,7 +247,13 @@ def create_app(
     async def lifespan(app: FastAPI):
         """Own an httpx client for the app's lifetime, unless one was injected."""
         if app.state.client is None:
-            app.state.client = httpx.AsyncClient(timeout=app.state.timeout_seconds)
+            app.state.client = httpx.AsyncClient(
+                timeout=app.state.timeout_seconds,
+                limits=httpx.Limits(
+                    max_connections=MAX_DOWNSTREAM_CONNECTIONS,
+                    max_keepalive_connections=MAX_KEEPALIVE_CONNECTIONS,
+                ),
+            )
         try:
             yield
         finally:
@@ -214,6 +268,8 @@ def create_app(
     app.state.timeout_seconds = timeout_seconds
     app.state.injected_client = client
     app.state.client = client
+    app.state.max_body_bytes = max_body_bytes
+    app.state.max_batch_size = max_batch_size
 
     @app.get("/healthz")
     async def healthz():
@@ -228,7 +284,17 @@ def create_app(
         just a list of messages, each authorized independently, with the
         locally-rejected results merged back into the downstream responses.
         """
-        raw = await request.body()
+        try:
+            raw = await read_capped_body(request, app.state.max_body_bytes)
+        except BodyTooLarge as exc:
+            logger.warning("rejected oversized body: %s", exc)
+            return JSONResponse(
+                error_response(
+                    None, PAYLOAD_TOO_LARGE, "Invalid Request: payload too large",
+                    {"max_bytes": app.state.max_body_bytes},
+                ),
+                status_code=413,
+            )
         try:
             payload = json.loads(raw)
         except ValueError:
@@ -250,6 +316,18 @@ def create_app(
             return JSONResponse(
                 error_response(None, INVALID_REQUEST, "Invalid Request: empty batch"),
                 status_code=400,
+            )
+
+        if is_batch and len(messages) > app.state.max_batch_size:
+            # Authorization is per message, so an unbounded batch is unbounded
+            # work for one request. Refuse rather than degrade.
+            logger.warning("rejected oversized batch of %d", len(messages))
+            return JSONResponse(
+                error_response(
+                    None, PAYLOAD_TOO_LARGE, "Invalid Request: batch too large",
+                    {"max_batch_size": app.state.max_batch_size, "received": len(messages)},
+                ),
+                status_code=413,
             )
 
         forward: list[dict[str, Any]] = []

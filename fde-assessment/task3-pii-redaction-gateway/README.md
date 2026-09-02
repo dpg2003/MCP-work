@@ -148,6 +148,51 @@ and an internal hostname in the upstream exception and assert neither reaches
 the client. A provider that fails *before* any bytes are sent still gets a
 proper `502` with a structured error body.
 
+## Performance
+
+The redactor was profiled, not guessed at. `find_matches` was 94% of stream
+time, and the cause was the **email** pattern rather than the card pattern: its
+local-part class `[A-Za-z0-9._%+\-]` includes digits, so on a long digit run the
+engine consumed the whole run at every start position and then backtracked one
+character at a time looking for an `@` that was not there — quadratic.
+
+| Workload | Before | After |
+| --- | --- | --- |
+| Digit-heavy, 70-char chunks | 0.43 MB/s | **5.24 MB/s** |
+| Prose, 1-char chunks | 0.01 MB/s | **0.31 MB/s** |
+| Prose, 70-char chunks | 4.66 MB/s | **6.53 MB/s** |
+| Single scan of a 326-char digit buffer | 161 µs | **6 µs** |
+
+The fix is a *content gate*, not a rewritten regex: an email cannot match text
+containing no `@`, and neither SSNs nor cards can match text containing no digit,
+so `_pattern_for` selects the narrowest variant that can still match. Dropping an
+alternative that provably cannot match anywhere cannot change the result.
+
+A possessive-quantifier rewrite was considered and rejected: it silently breaks
+a real case. In `"4111111111111111 2222"` the engine must backtrack to find the
+16-digit card, and `{12,18}+` would take 19 digits, fail the trailing `\b`, and
+match nothing.
+
+**This is an optimisation applied to a security control, so it is held to a
+higher bar than "the other tests still pass."** `tests/test_pattern_equivalence.py`
+compares the narrowed path against the unoptimised full alternation over 14,000+
+randomised inputs — random strings, compositions of real PII and near-misses,
+adversarial `@` placements in digit runs, and every card-length boundary — using
+an independent Luhn implementation in the oracle so the two share no code path.
+
+`tests/test_performance_properties.py` guards the algorithmic behaviour without
+depending on absolute timings (throughput numbers belong in `bench/`, where a
+noisy CI box cannot fail a build). Reverting the optimisation fails 7 of its 10
+tests, including a measured 179× slowdown against an 8× threshold.
+
+## Observability
+
+Every response carries `X-Request-Id`, honouring a caller-supplied value so this
+hop joins an existing trace. A streamed response commits its status with the
+first byte, so when something fails mid-stream that id is the only thing a user
+can quote — it is stamped on the failure log line, and a test asserts the two
+match.
+
 ## Key design tradeoff
 
 The interesting choice was **adaptive hold-back versus a fixed tail window**. A

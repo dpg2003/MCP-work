@@ -188,6 +188,63 @@ internal hostname, and an `sk-live-` API key fragment; tests assert none of it
 appears in any client response, on either the single-provider or
 both-providers-down path.
 
+## Performance
+
+### Limiter throughput: 7,080 → 18,351 ops/s
+
+- **Covering index** `(tenant, ts, tokens)` answers the hot `SUM` from the index
+  alone, without touching the table.
+- **Amortised eviction.** Deleting expired rows on every request was pure write
+  amplification: every read already filters on `ts > cutoff`, so an un-deleted
+  expired row cannot influence any answer. The `DELETE` is housekeeping, and
+  housekeeping does not need to run a thousand times a second.
+
+### Getting SQLite off the event loop: 647 → 1,956 req/s
+
+Admission ran SQLite directly inside a coroutine, so a commit spike (28 ms
+observed) stalled *every* in-flight request on the worker, not just its own.
+
+The obvious fix — `asyncio.to_thread` per call — measured **worse**: the thread
+hop costs ~260 µs against 54 µs of actual database work, making it slower than
+blocking, just politer.
+
+So the limiter uses **group commit**, the same technique a database WAL uses.
+Concurrent admissions queue; one worker drains the whole group and hands it to a
+single thread, which decides the batch inside one transaction. Sixty-four
+requests pay one hop and one commit instead of sixty-four of each — so throughput
+*improves* with concurrency instead of collapsing.
+
+| Concurrency | Throughput | p50 | p99 |
+| --- | --- | --- | --- |
+| 4 | 1,500 req/s | 1.9 ms | 3.6 ms |
+| 16 | 1,934 req/s | 4.8 ms | 9.2 ms |
+| 64 | 1,985 req/s | 16.0 ms | 49.9 ms |
+
+Before: 647 req/s at concurrency 64, p50 95 ms, p99 152 ms.
+
+**Semantics are unchanged.** `try_consume_many` decides a batch in arrival order,
+each request against the running total including everything admitted earlier in
+the same batch — exactly what sequential calls produce. The in-memory running
+total is exact rather than approximate because `BEGIN IMMEDIATE` holds the write
+lock for the whole transaction. `tests/test_admission.py` asserts this against a
+serial oracle over 500 randomised batches, and separately asserts the limit is
+never exceeded under concurrency.
+
+A lone request is never delayed waiting for a batch that may not arrive: the
+worker takes whatever is *already* queued and dispatches immediately.
+
+## Operational surface
+
+- **`/healthz`** — liveness. Cheap and dependency-free, because a probe that
+  fails on a downstream blip makes an orchestrator restart a healthy pod.
+- **`/readyz`** — readiness. Touches the database admission depends on, and
+  returns 503 so the instance leaves rotation rather than serving errors. The two
+  are deliberately independent, and a test asserts liveness still passes when
+  readiness fails.
+- **Bounded provider pool** (100 connections, 20 keep-alive).
+- **Graceful shutdown** drains the group-commit workers on lifespan exit, with a
+  test asserting no accepted admission is lost.
+
 ## Key design tradeoff
 
 The main one is **reserve-then-reconcile versus charge-on-completion**. Charging

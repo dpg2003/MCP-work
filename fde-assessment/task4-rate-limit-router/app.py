@@ -19,6 +19,7 @@ unexpected internal exception — returns the same payload shape from
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -108,7 +109,14 @@ def create_app(
     app.state.admission = AdmissionController(limiter)
 
     if router is None:
-        client = httpx.AsyncClient()
+        # Bound the pool so a burst cannot exhaust file descriptors, and so
+        # backpressure shows up as queuing rather than as collapse.
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=int(os.environ.get("PROVIDER_MAX_CONNECTIONS", 100)),
+                max_keepalive_connections=int(os.environ.get("PROVIDER_MAX_KEEPALIVE", 20)),
+            )
+        )
         app.state.owns_client = True
         app.state.client = client
         timeout_ms = int(os.environ.get("PROVIDER_TIMEOUT_MS", DEFAULT_TIMEOUT_MS))
@@ -158,6 +166,27 @@ def create_app(
     async def healthz():
         """Liveness probe. Touches neither the limiter nor a provider."""
         return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def readyz():
+        """Readiness probe: can this instance actually serve a request?
+
+        Distinct from ``/healthz`` on purpose. Liveness answers "is the process
+        alive" and must never fail for a dependency, or an orchestrator will
+        restart a healthy pod during a downstream blip. Readiness answers "can I
+        serve traffic right now", so it touches the database that admission
+        depends on -- and takes this instance out of rotation instead of
+        rejecting requests if that is broken.
+        """
+        try:
+            await asyncio.to_thread(app.state.limiter.row_count)
+        except Exception:
+            logger.exception("readiness probe failed")
+            return JSONResponse(
+                {"status": "not_ready", "checks": {"rate_limit_db": "error"}},
+                status_code=503,
+            )
+        return {"status": "ready", "checks": {"rate_limit_db": "ok"}}
 
     @app.post("/v1/complete")
     async def complete(body: CompleteRequest, x_api_key: str | None = Header(default=None)):

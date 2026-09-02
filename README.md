@@ -14,6 +14,7 @@ pytest suite, and its own README.
 ```bash
 ./setup.sh        # create .venv and install all four projects' dependencies
 ./run_tests.sh    # documentation check + all four test suites
+./bench/run_all.sh   # optional: reproduce the performance numbers
 ```
 
 That is the whole setup. `run_tests.sh` runs each suite in its own process,
@@ -22,19 +23,19 @@ Extra arguments pass through to pytest (`./run_tests.sh -x -k redact`).
 
 ```
 ===== documentation coverage =====
-source           156/ 156 (100.0%)  [enforced]
-test support      73/  73 (100.0%)  [enforced]
-test functions    37/ 181 ( 20.4%)  [reported]
+source           183/ 183 (100.0%)  [enforced]
+test support      97/  97 (100.0%)  [enforced]
+test functions    65/ 243 ( 26.7%)  [reported]
 documentation check passed
 ===== task1-mcp-server =====        54 passed
-===== task2-security-gateway =====  72 passed
-===== task3-pii-redaction-gateway = 170 passed
-===== task4-rate-limit-router =====  67 passed
+===== task2-security-gateway =====  84 passed
+===== task3-pii-redaction-gateway = 219 passed
+===== task4-rate-limit-router ===== 100 passed
 ===== summary =====
 all suites passed
 ```
 
-**363 tests, no network access and no API key required.**
+**457 tests, no network access and no API key required.**
 
 ### Running one project
 
@@ -48,9 +49,9 @@ pytest                    # test it
 | Project | Run command | Tests |
 | --- | --- | --- |
 | `task1-mcp-server` | `python server.py` | 54 |
-| `task2-security-gateway` | `uvicorn downstream:app --port 9001` + `uvicorn gateway:app --port 9000` | 72 |
-| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 170 |
-| `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 67 |
+| `task2-security-gateway` | `uvicorn downstream:app --port 9001` + `uvicorn gateway:app --port 9000` | 84 |
+| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 219 |
+| `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 100 |
 
 ---
 
@@ -243,6 +244,71 @@ Where each requirement from the assessment brief is implemented and tested.
 | Standardized error payload | `errors.GatewayError` | `test_every_error_path_shares_one_shape` |
 | No raw traces / internal details leak | normalisation at provider boundary | `test_no_upstream_detail_leaks_from_either_provider`, `test_both_down_gives_one_sanitized_error`, `test_unexpected_internal_exception_is_sanitized` |
 | Async concurrency / race conditions | `BEGIN IMMEDIATE` | `test_concurrent_requests_never_exceed_the_limit` (20 threads), `test_independent_limiter_instances_share_one_budget` |
+
+---
+
+## Performance and production readiness
+
+Every change below was driven by a profile or a measurement, and every one is
+guarded by a test that fails if it is reverted. Reproduce the numbers with
+`./bench/run_all.sh`.
+
+### Measured improvements
+
+| What | Before | After |
+| --- | --- | --- |
+| Redaction, digit-heavy content | 0.43 MB/s | **5.24 MB/s** |
+| Redaction, fine-grained chunks | 0.01 MB/s | **0.31 MB/s** |
+| Rate limiter admissions | 7,080 ops/s | **18,351 ops/s** |
+| Gateway throughput (concurrency 64) | 647 req/s | **1,956 req/s** |
+| Gateway p50 / p99 latency | 95 / 152 ms | **17 / 42 ms** |
+
+**Task 3 — a quadratic regex.** `find_matches` was 94% of stream time, and the
+culprit was the *email* pattern, not the card pattern: its local-part class
+includes digits, so on a long digit run the engine consumed the whole run at
+every start position then backtracked one character at a time hunting an `@`
+that was not there. Fixed with a content gate that selects the narrowest pattern
+that can still match, which is provably result-preserving.
+
+**Task 4 — blocking I/O on the event loop.** Admission ran SQLite inside a
+coroutine, so one commit spike (28 ms observed) stalled every in-flight request.
+`asyncio.to_thread` per call measured *worse* — the hop costs ~260 µs against
+54 µs of database work — so the limiter uses **group commit** instead: concurrent
+admissions are batched into one transaction and one thread hop, and throughput
+improves with concurrency rather than collapsing.
+
+### Hardening
+
+- **Resource limits.** Request body cap (1 MiB) enforced against both
+  `Content-Length` *and* the streamed read, batch-size cap (100), prompt caps —
+  all rejections, never truncations.
+- **Bounded connection pools** on every outbound client, so a burst queues
+  instead of exhausting file descriptors.
+- **Liveness vs readiness** as separate probes. Liveness is dependency-free so a
+  downstream blip cannot trigger restarts; readiness checks the database and
+  returns 503 to leave rotation.
+- **Graceful shutdown** drains in-flight admission work.
+- **Correlation ids** on every service. A streamed response commits its status
+  with the first byte, so the request id is the only thing a user can quote when
+  a stream fails — it is echoed in the header and stamped on the failure log.
+
+### How performance is tested
+
+Absolute throughput is *measured* in `bench/` and never asserted, because a noisy
+CI box is not a regression. What the suites assert is algorithmic behaviour that
+holds on any machine:
+
+- work scales linearly, not quadratically, with input size;
+- buffers stay bounded regardless of stream length (invariant *and* `tracemalloc`);
+- the event loop keeps ticking through a 300 ms database stall;
+- batching actually occurs, and never changes an admission decision.
+
+Two optimisations touch correctness-critical code, so both are proved equivalent
+to the unoptimised path against randomised oracles: **14,000+** inputs for the
+redaction patterns (with an independent Luhn implementation, so oracle and
+subject share no code), and **500** randomised batches for admission. Reverting
+the redaction optimisation fails 7 of its 10 property tests, including a measured
+179x slowdown against an 8x threshold.
 
 ---
 
