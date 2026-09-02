@@ -77,9 +77,44 @@ SSN = r"\b\d{3}(?P<ssn_sep>[- ])\d{2}(?P=ssn_sep)\d{4}\b"
 # and version strings cannot match.
 CARD = r"\b\d(?:[ -]?\d){12,18}\b"
 
+# The full alternation, and two cheaper specialisations of it.
+#
+# PERFORMANCE: the email local-part class ``[A-Za-z0-9._%+\-]`` includes
+# digits, so on a long run of digits the engine consumes the whole run at every
+# start position, then backtracks one character at a time looking for an "@"
+# that is not there. That is quadratic, and it dominated profiles of
+# numeric-heavy streams (147us per scan of a 326-character digit buffer, versus
+# 3us for the card pattern on the same input).
+#
+# The fix is a content gate rather than a rewritten regex: an email cannot
+# match text with no "@" in it, and neither SSNs nor cards can match text with
+# no digit in it. Dropping an alternative that provably cannot match anywhere
+# cannot change the result, so ``_pattern_for`` picks the narrowest variant and
+# the quadratic path is simply never entered on numeric text.
 PATTERN = re.compile(
     rf"(?P<email>{EMAIL})|(?P<ssn>{SSN})|(?P<card>{CARD})",
 )
+_PATTERN_EMAIL_ONLY = re.compile(rf"(?P<email>{EMAIL})")
+_PATTERN_NUMERIC_ONLY = re.compile(rf"(?P<ssn>{SSN})|(?P<card>{CARD})")
+
+# Cheap content probes. ``str.find`` and a single-character scan are linear with
+# a very small constant, unlike the alternation they guard.
+_HAS_DIGIT = re.compile(r"[0-9]").search
+_NON_DIGITS = re.compile(r"[^0-9]").sub
+
+
+def _pattern_for(text: str) -> re.Pattern[str] | None:
+    """Narrowest pattern that can still match ``text``, or ``None`` for no match.
+
+    Purely an optimisation: every branch returns a pattern whose result on
+    ``text`` is identical to :data:`PATTERN`'s, because the alternatives it
+    omits cannot match text that lacks their mandatory characters.
+    """
+    has_at = "@" in text
+    has_digit = _HAS_DIGIT(text) is not None
+    if has_at:
+        return PATTERN if has_digit else _PATTERN_EMAIL_ONLY
+    return _PATTERN_NUMERIC_ONLY if has_digit else None
 
 # Suffixes that could still grow into a match. Anchored to the end of the
 # buffer; the earliest such start is what gets held back.
@@ -114,16 +149,28 @@ def _passes_luhn(digits: str) -> bool:
 
 
 def _is_real_match(match: re.Match[str]) -> bool:
-    """Post-filter for matches whose regex alone is not specific enough."""
-    if match.lastgroup == "card" or match.group("card") is not None:
-        digits = re.sub(r"[^0-9]", "", match.group())
+    """Post-filter for matches whose regex alone is not specific enough.
+
+    Uses ``groupdict()`` rather than ``group("card")`` because the pattern that
+    produced the match may be one of the narrowed variants, which does not
+    always define a ``card`` group.
+    """
+    if match.groupdict().get("card") is not None:
+        digits = _NON_DIGITS("", match.group())
         return 13 <= len(digits) <= 19 and _passes_luhn(digits)
     return True
 
 
 def find_matches(text: str) -> Iterable[re.Match[str]]:
-    """Yield the matches that survive post-filtering, in order, non-overlapping."""
-    for match in PATTERN.finditer(text):
+    """Yield the matches that survive post-filtering, in order, non-overlapping.
+
+    Results are identical to scanning with :data:`PATTERN`; see
+    :func:`_pattern_for` for why narrowing is safe.
+    """
+    pattern = _pattern_for(text)
+    if pattern is None:
+        return
+    for match in pattern.finditer(text):
         if _is_real_match(match):
             yield match
 

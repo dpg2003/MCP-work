@@ -38,6 +38,7 @@ from errors import (
     GatewayError,
     new_request_id,
 )
+from admission import AdmissionController
 from providers import HttpModelProvider
 from rate_limiter import DEFAULT_LIMIT_TOKENS, DEFAULT_WINDOW_SECONDS, RateLimiter
 from router import DEFAULT_TIMEOUT_MS, ModelRouter
@@ -81,10 +82,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """Close the httpx client on shutdown, but only if this app created it."""
+        """Drain the admission workers and close a client we own, on shutdown."""
         try:
             yield
         finally:
+            await app.state.admission.aclose()
             if app.state.owns_client:
                 await app.state.client.aclose()
 
@@ -99,7 +101,11 @@ def create_app(
             limit_tokens=int(os.environ.get("RATE_LIMIT_TOKENS", DEFAULT_LIMIT_TOKENS)),
             window_seconds=float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", DEFAULT_WINDOW_SECONDS)),
         )
+    # Everything downstream talks to the async, group-committing facade rather
+    # than to the limiter directly, so no request ever does SQLite I/O on the
+    # event loop. `limiter` stays reachable for tests and for shutdown.
     app.state.limiter = limiter
+    app.state.admission = AdmissionController(limiter)
 
     if router is None:
         client = httpx.AsyncClient()
@@ -166,15 +172,15 @@ def create_app(
         if tenant is None:
             raise GatewayError(UNAUTHENTICATED, request_id=request_id)
 
-        limiter: RateLimiter = app.state.limiter
+        admission: AdmissionController = app.state.admission
         estimated = estimate_tokens(body.prompt, body.max_tokens)
-        decision = limiter.try_consume(tenant, estimated)
+        decision = await admission.try_consume(tenant, estimated)
         if not decision.allowed:
             raise GatewayError(
                 RATE_LIMIT_EXCEEDED,
                 details={
                     "limit_tokens": decision.limit_tokens,
-                    "window_seconds": limiter.window_seconds,
+                    "window_seconds": admission.window_seconds,
                     "used_tokens": decision.used_tokens,
                     "requested_tokens": decision.requested_tokens,
                     "retry_after_seconds": decision.retry_after_seconds,
@@ -187,19 +193,21 @@ def create_app(
         except GatewayError:
             # The request never produced tokens; give the budget back rather
             # than charging a tenant for an outage that was not their fault.
-            limiter.release(decision.reservation_id)
+            await admission.release(decision.reservation_id)
             raise
         except Exception as exc:
             # A bug, not a provider failure. Caught here rather than left to the
             # framework's handler so the reservation is still released, and so
             # the client gets the gateway's own error shape either way.
-            limiter.release(decision.reservation_id)
+            await admission.release(decision.reservation_id)
             logger.exception("request_id=%s unexpected routing failure", request_id)
             raise GatewayError(
                 INTERNAL_ERROR, request_id=request_id, internal_detail=f"{type(exc).__name__}"
             ) from exc
 
-        limiter.reconcile(decision.reservation_id, routed.completion.tokens_used)
+        window_tokens = await admission.reconcile(
+            decision.reservation_id, routed.completion.tokens_used, tenant
+        )
 
         payload: dict[str, Any] = {
             "request_id": request_id,
@@ -209,8 +217,8 @@ def create_app(
             "usage": {
                 "estimated_tokens": estimated,
                 "actual_tokens": routed.completion.tokens_used,
-                "tenant_window_tokens": limiter.usage(tenant),
-                "limit_tokens": limiter.limit_tokens,
+                "tenant_window_tokens": window_tokens,
+                "limit_tokens": admission.limit_tokens,
             },
         }
         return JSONResponse(payload, headers={"X-Request-Id": request_id})
