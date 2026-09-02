@@ -1,0 +1,112 @@
+"""LLM Gateway with a streaming PII-redaction guardrail.
+
+``POST /v1/generate`` proxies a prompt to the configured provider and streams
+the response back with emails, SSNs, and card numbers replaced by
+``[REDACTED]`` -- correctly even when a pattern straddles chunk boundaries.
+
+Response framing is ``text/plain`` chunked transfer. The redaction layer is
+independent of framing; SSE would only change how the same emitted strings are
+wrapped.
+
+Mid-stream failures
+-------------------
+Once the first byte is sent the status code is committed, so an upstream
+failure cannot become a 502. The gateway instead flushes whatever is safely
+redacted, appends one sanitized sentinel line, and closes the connection:
+
+    \\n[gateway-error] upstream_stream_failed\\n
+
+That is a clean close, not a hang, and it carries no provider detail.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from collections.abc import AsyncIterator
+
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from providers import UpstreamStreamError, provider_from_env
+from redactor import DEFAULT_MAX_HOLD, StreamRedactor
+
+logger = logging.getLogger("fde.pii_gateway")
+
+ERROR_SENTINEL = "\n[gateway-error] upstream_stream_failed\n"
+
+
+class GenerateRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=100_000)
+
+
+async def redacted_stream(
+    source: AsyncIterator[str], max_hold: int = DEFAULT_MAX_HOLD
+) -> AsyncIterator[bytes]:
+    """Redact ``source`` and encode for the wire.
+
+    Encoding happens here, after redaction, on complete ``str`` values. That
+    ordering is what makes multi-byte text safe: the redactor never sees half a
+    UTF-8 sequence, and a chunk boundary can never fall inside a character.
+    """
+    redactor = StreamRedactor(max_hold=max_hold)
+    failed = False
+    try:
+        async for chunk in source:
+            emitted = redactor.feed(chunk)
+            if emitted:
+                yield emitted.encode("utf-8")
+    except UpstreamStreamError as exc:
+        failed = True
+        logger.error("upstream stream failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001 - anything at all, sanitized below
+        failed = True
+        logger.exception("unexpected upstream failure: %s", type(exc).__name__)
+    finally:
+        # The held-back tail is redacted and flushed even on failure. Dropping
+        # it would silently truncate every stream that errors.
+        tail = redactor.close()
+        if tail:
+            yield tail.encode("utf-8")
+        if failed:
+            yield ERROR_SENTINEL.encode("utf-8")
+
+
+def create_app(provider=None, max_hold: int = DEFAULT_MAX_HOLD) -> FastAPI:
+    app = FastAPI(title="LLM gateway with PII redaction")
+    app.state.provider = provider or provider_from_env()
+    app.state.max_hold = max_hold
+
+    @app.get("/healthz")
+    async def healthz():
+        return {"status": "ok", "provider": type(app.state.provider).__name__}
+
+    @app.post("/v1/generate")
+    async def generate(request: GenerateRequest):
+        try:
+            source = app.state.provider.stream(request.prompt)
+        except UpstreamStreamError as exc:
+            # Failed before any bytes were sent, so a real status code is still
+            # available.
+            logger.error("provider unavailable: %s", exc)
+            return JSONResponse(
+                {"error": {"type": "upstream_unavailable", "message": "Upstream provider error"}},
+                status_code=502,
+            )
+        return StreamingResponse(
+            redacted_stream(source, max_hold=app.state.max_hold),
+            media_type="text/plain; charset=utf-8",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
+
+    return app
+
+
+app = create_app()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import uvicorn
+
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")))
