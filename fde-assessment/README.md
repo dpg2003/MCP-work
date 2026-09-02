@@ -16,14 +16,44 @@ pytest suite, and README.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-for task in fde-assessment/task*/; do
-  pip install -q -r "$task/requirements.txt"
-  (cd "$task" && pytest)
-done
+for task in fde-assessment/task*/; do pip install -q -r "$task/requirements.txt"; done
+
+./fde-assessment/run_all_tests.sh
 ```
+
+The script runs each suite in **its own process** and reports which projects
+failed. Any extra arguments are passed through to pytest
+(`./run_all_tests.sh -x -k redact`).
 
 Each task's README documents its single run command, its test command, and the
 key design tradeoff behind it.
+
+### Why one process per project
+
+Do not run `pytest` across more than one project at a time. These are four
+independent projects, and two of them legitimately define a top-level `app.py`
+and a top-level `providers.py`. Those names are correct within each project and
+irreconcilable across them: Python's `sys.modules` is global, so a single
+pytest process binds whichever copy it imported first.
+
+The dangerous part is that this does not reliably error. `from app import
+create_app` resolves in both projects, so a combined run can *silently* test
+Task 4's gateway against Task 3's application module and report a pass.
+
+So a multi-project invocation is refused outright, with a message pointing at
+the runner:
+
+```
+$ pytest                       # from the repository root
+ERROR:
+Refusing to collect more than one project in a single pytest process.
+...
+    /path/to/fde-assessment/run_all_tests.sh
+```
+
+Single-project runs are untouched and work from anywhere — `cd task3-… &&
+pytest`, `pytest fde-assessment/task2-security-gateway`, a single file, or a
+single node id.
 
 ## The hard pass/fail criteria
 
