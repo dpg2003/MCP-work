@@ -67,6 +67,9 @@ def main(argv: list[str]) -> int:
         "",
         f"- **Generated:** {started}",
         "- **Regenerate:** `python tools/assessment/run_matrix.py`",
+        "- **Scope:** all four tasks, 54 cases — the complete assessment. "
+        "(An earlier draft of the source document referenced a fifth task; it was "
+        "confirmed not to exist.)",
         "",
         "Nothing here is asserted by hand. The MCP server is driven as a real",
         "subprocess over a real pipe; the HTTP services run on real sockets; the",
