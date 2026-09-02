@@ -74,19 +74,28 @@ def test_card_split_mid_group():
     assert out == f"card {REPLACEMENT} end"
 
 
-@pytest.mark.parametrize("secret", [EMAIL, SSN, VISA, VISA_SPACED, MASTERCARD, AMEX])
-@pytest.mark.parametrize("split_at", range(1, 16))
+ALL_SECRETS = [EMAIL, SSN, VISA, VISA_SPACED, MASTERCARD, AMEX]
+
+# Every interior split point of every secret, generated per-secret so the
+# parametrization covers each one exactly to its own length -- no skipped
+# combinations, and no split points missed on the longer secrets.
+EVERY_SPLIT_POINT = [
+    pytest.param(secret, split_at, id=f"{secret[:6]}..@{split_at}")
+    for secret in ALL_SECRETS
+    for split_at in range(1, len(secret))
+]
+
+
+@pytest.mark.parametrize("secret, split_at", EVERY_SPLIT_POINT)
 def test_every_split_point_of_every_secret(secret, split_at):
     """Exhaustive: split each secret at every position, assert full redaction."""
-    if split_at >= len(secret):
-        pytest.skip("split point beyond the secret")
     text = f"prefix {secret} suffix"
     cut = len("prefix ") + split_at
     out = stream_through([text[:cut], text[cut:]])
     assert out == f"prefix {REPLACEMENT} suffix", out
 
 
-@pytest.mark.parametrize("secret", [EMAIL, SSN, VISA, VISA_SPACED, MASTERCARD, AMEX])
+@pytest.mark.parametrize("secret", ALL_SECRETS)
 def test_secret_streamed_one_character_at_a_time(secret):
     """The worst case: a pattern spanning as many chunks as it has characters."""
     text = f"before {secret} after"

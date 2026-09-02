@@ -47,7 +47,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-163 tests, no network and no API key required.
+170 tests, no network and no API key required.
 
 ## How the sliding buffer works
 

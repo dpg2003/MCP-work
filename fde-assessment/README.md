@@ -7,10 +7,10 @@ pytest suite, and README.
 | --- | --- | --- | --- |
 | 1 | [`task1-mcp-server`](task1-mcp-server/) | MCP server over stdio with strict Pydantic validation and guaranteed stdout purity | 54 |
 | 2 | [`task2-security-gateway`](task2-security-gateway/) | Authenticating JSON-RPC reverse proxy with role-based `admin_*` tool filtering | 72 |
-| 3 | [`task3-pii-redaction-gateway`](task3-pii-redaction-gateway/) | Streaming LLM gateway redacting PII across chunk boundaries | 163 |
+| 3 | [`task3-pii-redaction-gateway`](task3-pii-redaction-gateway/) | Streaming LLM gateway redacting PII across chunk boundaries | 170 |
 | 4 | [`task4-rate-limit-router`](task4-rate-limit-router/) | Token-aware sliding-window rate limiter (SQLite) with model failover | 67 |
 
-356 tests total, none requiring network access or an API key.
+363 tests total, none requiring network access or an API key.
 
 ## Run everything
 
