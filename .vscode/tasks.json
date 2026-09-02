@@ -1,0 +1,145 @@
+{
+  "version": "2.0.0",
+  "options": { "cwd": "${workspaceFolder}" },
+  "presentation": { "panel": "dedicated", "clear": true },
+  "tasks": [
+    {
+      "label": "Setup: install everything",
+      "type": "shell",
+      "command": "./setup.sh",
+      "problemMatcher": [],
+      "group": "build"
+    },
+    {
+      "label": "Tests: ALL (doc check + 4 suites)",
+      "type": "shell",
+      "command": "./run_tests.sh",
+      "problemMatcher": [],
+      "group": { "kind": "test", "isDefault": true }
+    },
+    {
+      "label": "Tests: Task 1 - MCP server",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m pytest",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task1-mcp-server" },
+      "problemMatcher": [], "group": "test"
+    },
+    {
+      "label": "Tests: Task 2 - security gateway",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m pytest",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway" },
+      "problemMatcher": [], "group": "test"
+    },
+    {
+      "label": "Tests: Task 3 - PII redaction",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m pytest",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task3-pii-redaction-gateway" },
+      "problemMatcher": [], "group": "test"
+    },
+    {
+      "label": "Tests: Task 4 - rate limit router",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m pytest",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task4-rate-limit-router" },
+      "problemMatcher": [], "group": "test"
+    },
+    {
+      "label": "Benchmarks: run all",
+      "type": "shell",
+      "command": "./bench/run_all.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docs: coverage check",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python tools/check_docs.py",
+      "problemMatcher": []
+    },
+
+    {
+      "label": "Run: Task 2 - mock downstream (:9001)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m uvicorn downstream:app --port 9001",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway" },
+      "isBackground": true, "problemMatcher": []
+    },
+    {
+      "label": "Run: Task 2 - security gateway (:9000)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m uvicorn gateway:app --port 9000",
+      "options": {
+        "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
+        "env": {
+          "DOWNSTREAM_URL": "http://127.0.0.1:9001/mcp",
+          "GATEWAY_TOKEN_SECRET": "dev-secret-change-me"
+        }
+      },
+      "isBackground": true, "problemMatcher": [],
+      "dependsOn": ["Run: Task 2 - mock downstream (:9001)"]
+    },
+    {
+      "label": "Run: Task 2 - mint a viewer token",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python tokens.py viewer",
+      "options": {
+        "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
+        "env": { "GATEWAY_TOKEN_SECRET": "dev-secret-change-me" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Task 2 - mint an admin token",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python tokens.py admin",
+      "options": {
+        "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
+        "env": { "GATEWAY_TOKEN_SECRET": "dev-secret-change-me" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run: Task 3 - PII redaction gateway (:8000)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m uvicorn app:app --port 8000",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task3-pii-redaction-gateway" },
+      "isBackground": true, "problemMatcher": []
+    },
+    {
+      "label": "Run: Task 4 - fake providers (:9100)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m uvicorn fake_upstream:app --port 9100",
+      "options": { "cwd": "${workspaceFolder}/fde-assessment/task4-rate-limit-router" },
+      "isBackground": true, "problemMatcher": []
+    },
+    {
+      "label": "Run: Task 4 - rate limit router (:8080)",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m uvicorn app:app --port 8080",
+      "options": {
+        "cwd": "${workspaceFolder}/fde-assessment/task4-rate-limit-router",
+        "env": {
+          "RATE_LIMIT_DB": "${workspaceFolder}/.dev-rate-limit.sqlite3",
+          "PRIMARY_URL": "http://127.0.0.1:9100/primary/v1/complete",
+          "SECONDARY_URL": "http://127.0.0.1:9100/secondary/v1/complete"
+        }
+      },
+      "isBackground": true, "problemMatcher": [],
+      "dependsOn": ["Run: Task 4 - fake providers (:9100)"]
+    },
+
+    {
+      "label": "Demo: end-to-end walkthrough of all four",
+      "type": "shell",
+      "command": "./tools/demo.sh",
+      "problemMatcher": []
+    },
+    {
+      "label": "MCP Inspector: open Task 1 server",
+      "type": "shell",
+      "command": "npx -y @modelcontextprotocol/inspector ${workspaceFolder}/.venv/bin/python ${workspaceFolder}/fde-assessment/task1-mcp-server/server.py",
+      "problemMatcher": []
+    }
+  ]
+}

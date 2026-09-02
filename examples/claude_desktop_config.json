@@ -1,0 +1,9 @@
+{
+  "_comment": "Claude Desktop MCP config for the Task 1 server. Copy the mcpServers block into your own claude_desktop_config.json and replace ABSOLUTE_PATH_TO_REPO with the full path to this checkout. On macOS the file lives at ~/Library/Application Support/Claude/claude_desktop_config.json; on Windows at %APPDATA%\\Claude\\claude_desktop_config.json.",
+  "mcpServers": {
+    "fde-customer-ops": {
+      "command": "ABSOLUTE_PATH_TO_REPO/.venv/bin/python",
+      "args": ["ABSOLUTE_PATH_TO_REPO/fde-assessment/task1-mcp-server/server.py"]
+    }
+  }
+}

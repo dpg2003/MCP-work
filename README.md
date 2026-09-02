@@ -11,9 +11,15 @@ pytest suite, and its own README.
 
 ## Quick start
 
+**Just want to try it?** See **[TESTING.md](TESTING.md)** — open the folder in
+VS Code, reopen in the dev container, and run one task. Nothing else needed.
+
+From a terminal:
+
 ```bash
-./setup.sh        # create .venv and install all four projects' dependencies
-./run_tests.sh    # documentation check + all four test suites
+./setup.sh           # create .venv and install all four projects' dependencies
+./run_tests.sh       # doc check + config check + all four test suites
+./tools/demo.sh      # end-to-end walkthrough of all four services
 ./bench/run_all.sh   # optional: reproduce the performance numbers
 ```
 
@@ -29,13 +35,13 @@ test functions    65/ 243 ( 26.7%)  [reported]
 documentation check passed
 ===== task1-mcp-server =====        54 passed
 ===== task2-security-gateway =====  84 passed
-===== task3-pii-redaction-gateway = 219 passed
+===== task3-pii-redaction-gateway = 253 passed
 ===== task4-rate-limit-router ===== 100 passed
 ===== summary =====
 all suites passed
 ```
 
-**457 tests, no network access and no API key required.**
+**491 tests, no network access and no API key required.**
 
 ### Running one project
 
@@ -50,7 +56,7 @@ pytest                    # test it
 | --- | --- | --- |
 | `task1-mcp-server` | `python server.py` | 54 |
 | `task2-security-gateway` | `uvicorn downstream:app --port 9001` + `uvicorn gateway:app --port 9000` | 84 |
-| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 219 |
+| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 253 |
 | `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 100 |
 
 ---
@@ -257,11 +263,21 @@ guarded by a test that fails if it is reverted. Reproduce the numbers with
 
 | What | Before | After |
 | --- | --- | --- |
-| Redaction, digit-heavy content | 0.43 MB/s | **5.24 MB/s** |
-| Redaction, fine-grained chunks | 0.01 MB/s | **0.31 MB/s** |
+| Redaction, digit-heavy content | 0.43 MB/s | **~5 MB/s** |
+| Redaction, fine-grained chunks | 0.01 MB/s | **~0.25 MB/s** |
+| Redaction, ordinary prose | 4.94 MB/s | **7.72 MB/s** |
+| Redaction, PII-dense text | 1.27 MB/s | **2.11 MB/s** |
 | Rate limiter admissions | 7,080 ops/s | **18,351 ops/s** |
 | Gateway throughput (concurrency 64) | 647 req/s | **1,956 req/s** |
 | Gateway p50 / p99 latency | 95 / 152 ms | **17 / 42 ms** |
+
+> A note on these numbers: this machine drifts. Re-measuring an unchanged commit
+> hours later moved throughput by ~30%, so absolute figures are only meaningful
+> against a same-session baseline. The prose and PII-dense rows above are a
+> same-session A/B; the rest were taken across sessions and should be read as
+> orders of magnitude, not precise ratios. The durable evidence is in the
+> property tests, which assert *algorithmic* behaviour and do not depend on the
+> box at all.
 
 **Task 3 — a quadratic regex.** `find_matches` was 94% of stream time, and the
 culprit was the *email* pattern, not the card pattern: its local-part class
@@ -269,6 +285,14 @@ includes digits, so on a long digit run the engine consumed the whole run at
 every start position then backtracked one character at a time hunting an `@`
 that was not there. Fixed with a content gate that selects the narrowest pattern
 that can still match, which is provably result-preserving.
+
+**Task 3 — a backtracking hold-back scan.** Once the quadratic email path was
+gone, `PARTIAL.search` — which decides how much text to hold back — became the
+next bottleneck at 38 µs per 68-character buffer. It is anchored to the end with
+`\Z`, so a greedy quantifier that overshoots backtracks one character at a time
+and fails again at every length. Making every quantifier *possessive* forbids
+that backtracking, and is safe precisely because of the `\Z` anchor. Verified
+against the backtracking form over 25,000+ randomised inputs.
 
 **Task 4 — blocking I/O on the event loop.** Admission ran SQLite inside a
 coroutine, so one commit spike (28 ms observed) stalled every in-flight request.
@@ -303,12 +327,20 @@ holds on any machine:
 - the event loop keeps ticking through a 300 ms database stall;
 - batching actually occurs, and never changes an admission decision.
 
-Two optimisations touch correctness-critical code, so both are proved equivalent
-to the unoptimised path against randomised oracles: **14,000+** inputs for the
+Three optimisations touch correctness-critical code, so each is proved equivalent
+to the unoptimised path against a randomised oracle: **14,000+** inputs for the
 redaction patterns (with an independent Luhn implementation, so oracle and
-subject share no code), and **500** randomised batches for admission. Reverting
-the redaction optimisation fails 7 of its 10 property tests, including a measured
-179x slowdown against an 8x threshold.
+subject share no code), **25,000+** for the possessive hold-back scan, and **500**
+randomised batches for admission. Reverting the redaction optimisation fails 7 of
+its 10 property tests, including a measured 179x slowdown against an 8x threshold.
+
+### Editor and MCP configuration
+
+`tools/check_configs.py` parses every VS Code, dev-container and MCP client
+config (they are JSONC, so a plain JSON parser is not enough) and verifies that
+every path they reference exists and every referenced script is executable.
+Without it those files rot silently — a moved directory leaves a task that fails
+only when someone tries to use it. It runs as part of `./run_tests.sh`.
 
 ---
 

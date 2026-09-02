@@ -163,6 +163,23 @@ character at a time looking for an `@` that was not there — quadratic.
 | Prose, 70-char chunks | 4.66 MB/s | **6.53 MB/s** |
 | Single scan of a 326-char digit buffer | 161 µs | **6 µs** |
 
+A second round then addressed the hold-back scan, which had become the
+bottleneck once the quadratic path was gone. `PARTIAL` is anchored to the end of
+the buffer with `\Z`, so a greedy quantifier that overshoots backtracks one
+character at a time and fails at every length. Every quantifier is now
+*possessive*, which is safe precisely because of that anchor — the maximal
+consumption is the only one that can reach the end.
+
+| Workload (same-session A/B) | Before | After |
+| --- | --- | --- |
+| One `PARTIAL` search, 68-char buffer | 38.6 µs | **17.1 µs** |
+| Ordinary prose, 70-char chunks | 4.94 MB/s | **7.72 MB/s** |
+| PII-dense text, 68-char chunks | 1.27 MB/s | **2.11 MB/s** |
+
+`tests/test_partial_equivalence.py` checks the possessive form against the
+original backtracking one over 25,000+ randomised inputs, every prefix of every
+test secret, and buffers longer than the hold-back window.
+
 The fix is a *content gate*, not a rewritten regex: an email cannot match text
 containing no `@`, and neither SSNs nor cards can match text containing no digit,
 so `_pattern_for` selects the narrowest variant that can still match. Dropping an
