@@ -174,6 +174,7 @@ def test_state_survives_a_real_subprocess_restart(db_path):
         """
     )
     def run(tenant, tokens):
+        """Run one admission attempt in a separate interpreter."""
         result = subprocess.run(
             [sys.executable, "-c", script, tenant, str(tokens)],
             capture_output=True, text=True, check=True,
@@ -209,6 +210,7 @@ def test_concurrent_requests_never_exceed_the_limit(limiter):
     barrier = threading.Barrier(20)
 
     def attempt():
+        """Consume 5,000 tokens, releasing all threads together first."""
         barrier.wait()  # maximise the overlap
         decision = limiter.try_consume("acme", 5_000)
         with results_lock:
@@ -239,6 +241,7 @@ def test_independent_limiter_instances_share_one_budget(db_path):
         barrier = threading.Barrier(40)
 
         def attempt(index: int):
+            """Consume 2,500 tokens through one of the limiter instances."""
             barrier.wait()
             decision = limiters[index % len(limiters)].try_consume("acme", 2_500)
             with lock:

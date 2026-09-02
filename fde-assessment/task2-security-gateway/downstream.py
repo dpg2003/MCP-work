@@ -62,14 +62,20 @@ class CallLog:
     """Records everything that actually reached the downstream server."""
 
     def __init__(self) -> None:
+        """Start with an empty log."""
         self.requests: list[dict[str, Any]] = []
         self.tool_calls: list[str] = []
 
     @property
     def count(self) -> int:
+        """Number of HTTP requests that reached this server.
+
+        The assertion that matters: a blocked call must leave this at zero.
+        """
         return len(self.requests)
 
     def reset(self) -> None:
+        """Clear the log between tests."""
         self.requests.clear()
         self.tool_calls.clear()
 
@@ -81,10 +87,16 @@ FAILURE = {"mode": "none", "delay_seconds": 0.0}
 
 
 def _error(request_id: Any, code: int, message: str) -> dict[str, Any]:
+    """Build a JSON-RPC error response."""
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
 def _handle_one(message: dict[str, Any]) -> dict[str, Any] | None:
+    """Serve one JSON-RPC message.
+
+    Returns ``None`` for a notification (a message with no ``id``), which the
+    caller drops rather than answering, per JSON-RPC 2.0.
+    """
     request_id = message.get("id")
     method = message.get("method")
 
@@ -114,10 +126,12 @@ def _handle_one(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def create_app() -> FastAPI:
+    """Build the mock downstream server, including its test-control endpoints."""
     app = FastAPI(title="Mock downstream MCP server")
 
     @app.post("/_control/failure")
     async def set_failure(request: Request):
+        """Test hook: choose how the next requests should fail."""
         body = await request.json()
         FAILURE["mode"] = body.get("mode", "none")
         FAILURE["delay_seconds"] = float(body.get("delay_seconds", 0.0))
@@ -125,16 +139,19 @@ def create_app() -> FastAPI:
 
     @app.post("/_control/reset")
     async def reset():
+        """Test hook: clear the call log and stop injecting failures."""
         CALL_LOG.reset()
         FAILURE.update({"mode": "none", "delay_seconds": 0.0})
         return {"ok": True}
 
     @app.get("/_control/stats")
     async def stats():
+        """Test hook: report what actually reached this server."""
         return {"count": CALL_LOG.count, "tool_calls": CALL_LOG.tool_calls}
 
     @app.post("/mcp")
     async def mcp(request: Request):
+        """Serve MCP over HTTP, honouring any injected failure mode."""
         payload = await request.json()
         CALL_LOG.requests.append(payload)
 

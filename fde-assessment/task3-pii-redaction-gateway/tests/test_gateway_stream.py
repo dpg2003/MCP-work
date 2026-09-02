@@ -15,6 +15,7 @@ from redactor import REPLACEMENT
 
 
 def build_client(provider, **kwargs) -> httpx.AsyncClient:
+    """An httpx client wired to a gateway using ``provider``."""
     app = create_app(provider=provider, **kwargs)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://gateway.test"
@@ -22,6 +23,7 @@ def build_client(provider, **kwargs) -> httpx.AsyncClient:
 
 
 async def collect(provider, prompt: str = "hello", **kwargs) -> str:
+    """Stream a full response and return it as one string."""
     async with build_client(provider, **kwargs) as client:
         async with client.stream("POST", "/v1/generate", json={"prompt": prompt}) as response:
             assert response.status_code == 200
@@ -196,7 +198,10 @@ async def test_unexpected_provider_exception_is_sanitized():
 
 async def test_provider_unavailable_before_any_bytes_gives_a_502():
     class DeadProvider:
+        """A provider that fails before yielding any bytes at all."""
+
         def stream(self, prompt):
+            """Fail immediately, while a real status code is still available."""
             raise UpstreamStreamError("ANTHROPIC_API_KEY is not set")
 
     async with build_client(DeadProvider()) as client:

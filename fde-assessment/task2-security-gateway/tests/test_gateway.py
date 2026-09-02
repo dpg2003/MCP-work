@@ -19,6 +19,7 @@ INVALID_PARAMS = -32602
 
 
 async def post(client, payload, headers=None):
+    """POST a JSON-RPC payload to the gateway."""
     return await client.post("/mcp", json=payload, headers=headers or {})
 
 

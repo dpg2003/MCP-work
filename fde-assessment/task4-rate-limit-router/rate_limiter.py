@@ -71,6 +71,7 @@ class Decision:
 
     @property
     def remaining_tokens(self) -> int:
+        """Tokens still available in the window, floored at zero."""
         return max(0, self.limit_tokens - self.used_tokens)
 
 
@@ -84,6 +85,17 @@ class RateLimiter:
         window_seconds: float = DEFAULT_WINDOW_SECONDS,
         clock: Callable[[], float] | None = None,
     ) -> None:
+        """Open (creating if needed) the SQLite database and ensure the schema.
+
+        Args:
+            db_path: On-disk database file. State persists here across
+                restarts, which is what makes the limit meaningful behind
+                more than one worker.
+            limit_tokens: Budget per tenant per window.
+            window_seconds: Length of the sliding window.
+            clock: Time source, injectable so window eviction can be tested
+                without sleeping for a real minute.
+        """
         self.db_path = db_path
         self.limit_tokens = limit_tokens
         self.window_seconds = window_seconds
@@ -103,6 +115,7 @@ class RateLimiter:
         self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
+        """Close the database connection. Persisted state is unaffected."""
         self._conn.close()
 
     # -- core ---------------------------------------------------------------

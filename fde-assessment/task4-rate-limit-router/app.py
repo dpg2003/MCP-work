@@ -54,6 +54,12 @@ DEFAULT_API_KEYS = {
 
 
 class CompleteRequest(BaseModel):
+    """Request body for ``POST /v1/complete``.
+
+    Bounds are rejections, not truncations: an oversized prompt or an
+    out-of-range ``max_tokens`` produces a standardized ``invalid_request``.
+    """
+
     prompt: str = Field(min_length=1, max_length=200_000)
     max_tokens: int = Field(default=256, ge=1, le=32_000)
 
@@ -63,8 +69,19 @@ def create_app(
     router: ModelRouter | None = None,
     api_keys: dict[str, str] | None = None,
 ) -> FastAPI:
+    """Build the gateway application.
+
+    Args:
+        limiter: Rate limiter. Injectable so tests can supply a temporary
+            database and a controllable clock; defaults to one configured
+            from the environment.
+        router: Model router. Injectable so tests can use stub providers.
+        api_keys: Key-to-tenant mapping; defaults to the demo mapping.
+    """
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Close the httpx client on shutdown, but only if this app created it."""
         try:
             yield
         finally:
@@ -107,10 +124,16 @@ def create_app(
     # -- error handlers: every failure exits through the same shape ---------
     @app.exception_handler(GatewayError)
     async def _gateway_error(request: Request, exc: GatewayError):
+        """Render a deliberate gateway error in the standard shape."""
         return JSONResponse(exc.to_payload(), status_code=exc.http_status)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError):
+        """Convert FastAPI's validation error into the gateway's own shape.
+
+        Only the offending field *names* are echoed, never the submitted
+        values, so an error response cannot reflect a caller's payload back out.
+        """
         error = GatewayError(
             INVALID_REQUEST,
             details={"fields": [".".join(str(p) for p in e["loc"][1:]) for e in exc.errors()]},
@@ -119,6 +142,7 @@ def create_app(
 
     @app.exception_handler(Exception)
     async def _unexpected(request: Request, exc: Exception):
+        """Backstop for anything unhandled: log the traceback, return a bare 500."""
         error = GatewayError(INTERNAL_ERROR)
         # The traceback goes to the log, correlated by request_id. Never to the client.
         logger.exception("request_id=%s unhandled error", error.request_id)
@@ -126,10 +150,16 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
+        """Liveness probe. Touches neither the limiter nor a provider."""
         return {"status": "ok"}
 
     @app.post("/v1/complete")
     async def complete(body: CompleteRequest, x_api_key: str | None = Header(default=None)):
+        """Authenticate, meter, route, and reconcile one completion request.
+
+        The reservation is released rather than charged whenever the request
+        produced no tokens, so a tenant is never billed for a gateway outage.
+        """
         request_id = new_request_id()
 
         tenant = app.state.api_keys.get(x_api_key or "")

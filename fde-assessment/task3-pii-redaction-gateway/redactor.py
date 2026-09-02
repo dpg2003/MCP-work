@@ -158,6 +158,18 @@ class StreamRedactor:
     """
 
     def __init__(self, max_hold: int = DEFAULT_MAX_HOLD) -> None:
+        """Create a redactor.
+
+        Args:
+            max_hold: Maximum characters ever held back, and therefore the
+                guaranteed split-width: any PII token up to this length is
+                caught however it is divided across chunks.
+
+        Raises:
+            ValueError: ``max_hold`` is too small to contain the longest token
+                the patterns can produce, which would silently weaken the
+                guarantee.
+        """
         if max_hold < 64:
             raise ValueError("max_hold below 64 cannot cover the supported patterns")
         self.max_hold = max_hold
@@ -169,6 +181,7 @@ class StreamRedactor:
 
     @property
     def buffered_chars(self) -> int:
+        """Characters currently held back. Bounded by ``max_hold`` plus one chunk."""
         return len(self._buffer)
 
     def feed(self, chunk: str) -> str:
@@ -192,6 +205,14 @@ class StreamRedactor:
 
     # -- internals ----------------------------------------------------------
     def _settled_limit(self) -> int:
+        """Index up to which the buffer can no longer be changed by future input.
+
+        The smaller of two bounds: the start of the trailing fragment that
+        could still grow into a match, and a hard floor of
+        ``len(buffer) - max_hold`` that caps the hold-back. The floor is safe
+        because no recognised token is longer than ``max_hold``, so a real
+        token always lies entirely within the held window.
+        """
         buffer = self._buffer
         # Floor: never hold more than max_hold characters. Safe because no
         # recognised token is longer than that, so a real token always lies
@@ -201,6 +222,13 @@ class StreamRedactor:
         return min(limit, len(buffer))
 
     def _drain(self, limit: int) -> str:
+        """Redact and emit ``buffer[:limit]``, retaining the remainder.
+
+        Matching runs against the whole buffer so ``\\b`` and neighbouring
+        context are evaluated correctly, but only matches that end at or
+        before ``limit`` are substituted. A match still open at the buffer end
+        pulls ``limit`` back to its start, so its prefix is never emitted raw.
+        """
         buffer = self._buffer
         out: list[str] = []
         position = 0

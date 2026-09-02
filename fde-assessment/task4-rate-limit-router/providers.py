@@ -26,6 +26,7 @@ class ProviderError(Exception):
     """Base for every normalised provider failure."""
 
     def __init__(self, provider: str, internal_detail: str) -> None:
+        """Record which provider failed and why, for the gateway's logs only."""
         super().__init__(f"{provider}: {internal_detail}")
         self.provider = provider
         # For the gateway's own logs only.
@@ -58,9 +59,17 @@ class Completion:
 
 
 class ModelProvider(Protocol):
+    """The only provider surface the router depends on.
+
+    Structural, not inherited, so a real endpoint, an HTTP fake, and an
+    in-process stub are interchangeable without a shared base class.
+    """
+
     name: str
 
-    async def complete(self, prompt: str, max_tokens: int) -> Completion: ...
+    async def complete(self, prompt: str, max_tokens: int) -> Completion:
+        """Return a completion, or raise a ``ProviderError`` subclass."""
+        ...
 
 
 @dataclass
@@ -81,12 +90,26 @@ class HttpModelProvider:
 
     @property
     def call_count(self) -> int:
+        """Number of calls made to this provider. Used to assert failover."""
         return len(self.calls)
 
     def reset(self) -> None:
+        """Clear the call log."""
         self.calls.clear()
 
     async def complete(self, prompt: str, max_tokens: int) -> Completion:
+        """Call the endpoint and normalise every failure mode.
+
+        Returns:
+            The parsed completion.
+
+        Raises:
+            ProviderTimeout: The deadline elapsed.
+            ProviderRateLimited: HTTP 429.
+            ProviderUnavailable: Connection failure, 5xx, or an undecodable
+                body -- all failover-worthy.
+            ProviderRejected: A non-retryable 4xx; failing over would repeat it.
+        """
         self.calls.append({"prompt": prompt, "max_tokens": max_tokens})
         try:
             response = await self.client.post(
@@ -134,12 +157,15 @@ class StubProvider:
 
     @property
     def call_count(self) -> int:
+        """Number of calls made to this provider."""
         return len(self.calls)
 
     def reset(self) -> None:
+        """Clear the call log."""
         self.calls.clear()
 
     async def complete(self, prompt: str, max_tokens: int) -> Completion:
+        """Return the configured completion, or raise the configured error."""
         import asyncio
 
         self.calls.append({"prompt": prompt, "max_tokens": max_tokens})

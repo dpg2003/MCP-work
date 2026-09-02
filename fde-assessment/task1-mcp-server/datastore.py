@@ -24,6 +24,13 @@ class CustomerNotFoundError(LookupError):
 
 @dataclass
 class Customer:
+    """One customer record, plus the refunds issued against it.
+
+    Mutable and owned by :class:`Datastore`; callers only ever see the
+    dictionary produced by :meth:`to_dict`, never this object, so they cannot
+    mutate stored state by accident.
+    """
+
     customer_id: str
     name: str
     email: str
@@ -34,6 +41,12 @@ class Customer:
     refunds: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise to the shape returned by ``get_customer_record``.
+
+        Deliberately projects rather than dumping the dataclass: the full
+        refund history is summarised to ``refund_count`` so a tool response
+        cannot grow without bound as refunds accumulate.
+        """
         return {
             "customer_id": self.customer_id,
             "name": self.name,
@@ -64,6 +77,11 @@ class Datastore:
         self.reset()
 
     def reset(self) -> None:
+        """Restore the seed fixtures, discarding every recorded refund.
+
+        Each customer is rebuilt from the seed so mutations from a previous
+        run cannot leak into the next one.
+        """
         with self._lock:
             self._customers = {
                 c.customer_id: Customer(**{**c.__dict__, "refunds": []}) for c in _SEED
@@ -71,6 +89,19 @@ class Datastore:
             self._refund_ids = itertools.count(1)
 
     def get_customer(self, customer_id: str) -> dict[str, Any]:
+        """Look up one customer.
+
+        Args:
+            customer_id: An already-validated ``CUST-XXXXX`` identifier.
+
+        Returns:
+            The record as a plain dictionary.
+
+        Raises:
+            CustomerNotFoundError: The id is well-formed but unknown. The
+                caller maps this to JSON-RPC ``-32000``, distinct from the
+                ``-32602`` used for malformed input.
+        """
         with self._lock:
             customer = self._customers.get(customer_id)
             if customer is None:
@@ -78,6 +109,22 @@ class Datastore:
             return customer.to_dict()
 
     def record_refund(self, customer_id: str, amount: float, reason: str) -> dict[str, Any]:
+        """Append a refund to a customer and return the created record.
+
+        The lookup, the id allocation and the append all happen under one lock,
+        so concurrent refunds cannot interleave into a duplicate ``refund_id``.
+
+        Args:
+            customer_id: An already-validated ``CUST-XXXXX`` identifier.
+            amount: A validated, strictly positive, finite amount.
+            reason: A validated, already-trimmed justification.
+
+        Returns:
+            A copy of the stored refund record.
+
+        Raises:
+            CustomerNotFoundError: The id is well-formed but unknown.
+        """
         with self._lock:
             customer = self._customers.get(customer_id)
             if customer is None:

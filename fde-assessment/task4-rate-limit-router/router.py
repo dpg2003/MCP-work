@@ -57,6 +57,13 @@ FAILOVER_ON = (ProviderTimeout, ProviderRateLimited, ProviderUnavailable)
 
 @dataclass
 class RoutedCompletion:
+    """A completion plus how it was obtained.
+
+    ``attempts`` records one gateway-owned label per provider tried (for
+    example ``["primary:timeout", "secondary:ok"]``). The labels are ours, not
+    the providers', so this is safe to surface to a client.
+    """
+
     completion: Completion
     provider_used: str
     failed_over: bool
@@ -64,12 +71,24 @@ class RoutedCompletion:
 
 
 class ModelRouter:
+    """Routes to a primary provider and fails over to a secondary.
+
+    Holds no health state by design; see the module docstring for why a
+    circuit breaker is deliberately absent.
+    """
+
     def __init__(
         self,
         primary: ModelProvider,
         secondary: ModelProvider,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
     ) -> None:
+        """Wire up both providers and push the deadline down into each.
+
+        The deadline is set on the providers rather than enforced here so it
+        covers connect, write, read and pool-acquire time. Cancelling an
+        awaited coroutine at the router level would abandon the socket instead.
+        """
         self.primary = primary
         self.secondary = secondary
         self.timeout_ms = timeout_ms
@@ -82,6 +101,21 @@ class ModelRouter:
     async def complete(
         self, prompt: str, max_tokens: int, request_id: str | None = None
     ) -> RoutedCompletion:
+        """Complete via the primary, falling back to the secondary if needed.
+
+        Args:
+            prompt: The prompt to complete.
+            max_tokens: Output budget.
+            request_id: Correlation id, echoed into the logs and any error.
+
+        Returns:
+            The completion and the attempt trail.
+
+        Raises:
+            GatewayError: The primary rejected the request non-retryably, or
+                both providers failed. Either way it is one error in the
+                gateway's own format, carrying neither provider's detail.
+        """
         attempts: list[str] = []
         first_failure: ProviderError | None = None
 

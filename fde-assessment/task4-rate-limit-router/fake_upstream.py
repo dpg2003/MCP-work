@@ -33,15 +33,18 @@ LEAKY_ERROR_BODY = (
 
 
 def reset() -> None:
+    """Return both endpoints to healthy and zero their call counters."""
     for entry in STATE.values():
         entry.update({"mode": "ok", "latency_seconds": 0.0, "calls": 0})
 
 
 def create_app() -> FastAPI:
+    """Build the fake provider app: two endpoints plus test-control routes."""
     app = FastAPI(title="Fake model providers")
 
     @app.post("/_control/{which}")
     async def control(which: str, request: Request):
+        """Test hook: set one endpoint's failure mode and injected latency."""
         body = await request.json()
         STATE[which]["mode"] = body.get("mode", "ok")
         STATE[which]["latency_seconds"] = float(body.get("latency_seconds", 0.0))
@@ -49,15 +52,23 @@ def create_app() -> FastAPI:
 
     @app.post("/_control/reset/all")
     async def control_reset():
+        """Test hook: reset both endpoints to healthy."""
         reset()
         return {"ok": True}
 
     @app.get("/_stats")
     async def stats():
+        """Test hook: report each endpoint's mode and call count."""
         return STATE
 
     @app.post("/{which}/v1/complete")
     async def complete(which: str, request: Request):
+        """Serve a completion, or the currently configured failure.
+
+        Error bodies deliberately contain a stack trace, a file path, an
+        internal hostname and a credential fragment, so the tests can assert
+        none of it survives the gateway.
+        """
         entry = STATE[which]
         entry["calls"] += 1
         body = await request.json()

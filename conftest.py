@@ -17,5 +17,6 @@ else:  # pragma: no cover - the assessment folder is always present
 
 
 def pytest_configure(config):
+    """Refuse the run early if it spans more than one project."""
     if check is not None:
         check(config)

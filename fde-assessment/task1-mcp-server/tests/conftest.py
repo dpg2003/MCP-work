@@ -60,6 +60,13 @@ class StdioClient:
 
     # -- plumbing -----------------------------------------------------------
     def _read_stdout(self) -> None:
+        """Drain stdout on a thread, recording every line verbatim.
+
+        Lines are kept even when they fail to parse, precisely so the
+        stdout-purity test can fail on them. Responses are indexed by id
+        because the server answers pipelined requests concurrently and may
+        reply out of order.
+        """
         for line in self.proc.stdout:  # type: ignore[union-attr]
             line = line.rstrip("\n")
             with self._lock:
@@ -80,22 +87,36 @@ class StdioClient:
             self._lock.notify_all()
 
     def _read_stderr(self) -> None:
+        """Drain stderr on a thread so the pipe cannot fill and block the server."""
         for line in self.proc.stderr:  # type: ignore[union-attr]
             self.stderr_lines.append(line.rstrip("\n"))
 
     def send_raw(self, payload: str) -> None:
+        """Write one raw line to stdin, bypassing any JSON encoding.
+
+        This is what lets the tests send frames a real client could not
+        construct: unbalanced braces, bare strings, ``NaN``.
+        """
         assert self.proc.stdin is not None
         self.proc.stdin.write(payload + "\n")
         self.proc.stdin.flush()
 
     def send(self, message: dict[str, Any]) -> None:
+        """Encode ``message`` as JSON and send it as one frame."""
         self.send_raw(json.dumps(message))
 
     def next_id(self) -> int:
+        """Allocate a fresh JSON-RPC request id."""
         self._next_id += 1
         return self._next_id
 
     def wait_for(self, request_id: Any, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+        """Block until the response with ``request_id`` arrives.
+
+        Raises:
+            TimeoutError: No response arrived in time, or the server closed
+                stdout first. Either is a failure, never a silent pass.
+        """
         with self._lock:
             if not self._lock.wait_for(
                 lambda: request_id in self._responses or self._eof, timeout=timeout
@@ -111,6 +132,7 @@ class StdioClient:
 
     # -- protocol convenience ----------------------------------------------
     def initialize(self) -> dict[str, Any]:
+        """Perform the MCP handshake and return the initialize response."""
         request_id = self.next_id()
         self.send(
             {
@@ -129,6 +151,7 @@ class StdioClient:
         return response
 
     def request(self, method: str, params: Any = None, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+        """Send a request and return its response."""
         request_id = self.next_id()
         message: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
@@ -137,12 +160,14 @@ class StdioClient:
         return self.wait_for(request_id, timeout=timeout)
 
     def call_tool(self, name: str, arguments: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """Send a ``tools/call`` request and return its response."""
         params: dict[str, Any] = {"name": name}
         if arguments is not None:
             params["arguments"] = arguments
         return self.request("tools/call", params, **kwargs)
 
     def close(self) -> None:
+        """Close stdin and reap the subprocess, killing it if it will not exit."""
         try:
             if self.proc.stdin and not self.proc.stdin.closed:
                 self.proc.stdin.close()

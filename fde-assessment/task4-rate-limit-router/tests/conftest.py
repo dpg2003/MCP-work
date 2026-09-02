@@ -1,3 +1,5 @@
+"""Shared fixtures for the Task 4 suite: a fake clock, a temp DB, a limiter."""
+
 from __future__ import annotations
 
 import sys
@@ -21,21 +23,25 @@ class FakeClock:
         return self.now
 
     def advance(self, seconds: float) -> None:
+        """Move the clock forward by ``seconds``."""
         self.now += seconds
 
 
 @pytest.fixture
 def clock() -> FakeClock:
+    """A controllable clock shared by a test and its limiter."""
     return FakeClock()
 
 
 @pytest.fixture
 def db_path(tmp_path) -> str:
+    """Path to a throwaway SQLite database inside the test's tmp dir."""
     return str(tmp_path / "rate_limit.sqlite3")
 
 
 @pytest.fixture
 def limiter(db_path, clock):
+    """A limiter on a temporary database, driven by the fake clock."""
     instance = RateLimiter(db_path=db_path, clock=clock)
     try:
         yield instance

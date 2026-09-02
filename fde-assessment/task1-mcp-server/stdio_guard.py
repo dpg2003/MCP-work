@@ -74,6 +74,7 @@ class MalformedFrameReporter:
 
     # -- ReadStream protocol ------------------------------------------------
     async def receive(self) -> SessionMessage | Exception:
+        """Return the next protocol message, answering any bad frames first."""
         while True:
             item = await self._inner.receive()
             if not isinstance(item, Exception):
@@ -91,6 +92,7 @@ class MalformedFrameReporter:
             await self._report(item)
 
     async def aclose(self) -> None:
+        """Close the wrapped stream. The write stream is not ours to close."""
         await self._inner.aclose()
 
     async def __aenter__(self) -> Self:
@@ -107,10 +109,16 @@ class MalformedFrameReporter:
 
     @property
     def last_context(self) -> Any:  # pragma: no cover - passthrough for the dispatcher
+        """Sender context of the last item, forwarded from the wrapped stream.
+
+        The dispatcher reads this to restore ``contextvars`` across the task
+        boundary, so the wrapper must not hide it.
+        """
         return getattr(self._inner, "last_context", None)
 
     # -- internals ----------------------------------------------------------
     async def _report(self, exc: Exception) -> None:
+        """Answer one undecodable frame with a JSON-RPC error response."""
         code, message, request_id = classify(exc)
         logger.warning("rejecting malformed frame: code=%s (%s)", code, type(exc).__name__)
         error = types.JSONRPCError(

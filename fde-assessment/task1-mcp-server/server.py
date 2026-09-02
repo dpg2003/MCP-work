@@ -135,6 +135,12 @@ def _validation_error_data(exc: ValidationError) -> list[dict[str, Any]]:
 
 
 def _text_result(payload: dict[str, Any]) -> types.CallToolResult:
+    """Wrap a tool's payload as a ``CallToolResult``.
+
+    The payload is returned twice: pretty-printed in a text block for clients
+    that render content directly, and as ``structured_content`` for clients
+    that consume it programmatically.
+    """
     return types.CallToolResult(
         content=[types.TextContent(type="text", text=json.dumps(payload, indent=2))],
         structured_content=payload,
@@ -171,11 +177,28 @@ def validate_tool_input(tool_name: str, arguments: dict[str, Any] | None) -> Bas
 
 
 async def on_list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
+    """Handle ``tools/list``: advertise both tools and their JSON Schemas.
+
+    The schemas are generated from the same Pydantic models that enforce
+    validation, so what a client is told and what the server accepts cannot
+    drift apart.
+    """
     logger.info("tools/list requested")
     return types.ListToolsResult(tools=TOOLS)
 
 
 async def on_call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
+    """Handle ``tools/call``: validate, dispatch, and map failures to error codes.
+
+    Validation happens before any side effect, so a rejected refund never
+    touches the datastore.
+
+    Raises:
+        MCPError: ``-32601`` for an unknown tool, ``-32602`` for input that
+            fails validation, ``-32000`` for a well-formed id with no record,
+            and ``-32603`` for anything unexpected (logged in full, but never
+            described on the wire).
+    """
     tool_name = params.name
     logger.info("tools/call name=%s", tool_name)
 
@@ -205,6 +228,11 @@ async def on_call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.C
 
 
 def build_server() -> Server:
+    """Construct the MCP server with both request handlers registered.
+
+    Separate from :func:`main` so tests can build a server without also
+    claiming the process's stdio.
+    """
     return Server(
         SERVER_NAME,
         version=SERVER_VERSION,
@@ -214,6 +242,11 @@ def build_server() -> Server:
 
 
 async def main_async() -> None:
+    """Serve MCP over stdio until the client closes the connection.
+
+    ``MalformedFrameReporter`` wraps the read stream so undecodable frames are
+    answered with a JSON-RPC error rather than silently dropped.
+    """
     server = build_server()
     async with stdio_server() as (read_stream, write_stream):
         logger.info("%s v%s listening on stdio", SERVER_NAME, SERVER_VERSION)
@@ -222,6 +255,11 @@ async def main_async() -> None:
 
 
 def main() -> None:
+    """Process entry point: configure logging to stderr, then serve.
+
+    Logging is configured *before* the stdout precondition is asserted so that
+    a refusal to start is itself visible on stderr.
+    """
     configure_logging()
     _assert_stdout_claimable()
     try:

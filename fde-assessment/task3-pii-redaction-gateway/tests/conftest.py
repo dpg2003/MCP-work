@@ -1,3 +1,5 @@
+"""Shared fixtures, PII samples, and chunking helpers for the Task 3 suite."""
+
 from __future__ import annotations
 
 import sys
@@ -29,6 +31,7 @@ def stream_through(chunks, max_hold: int | None = None) -> str:
 
 
 def split_every(text: str, size: int) -> list[str]:
+    """Split ``text`` into fixed-size chunks of ``size`` characters."""
     return [text[index : index + size] for index in range(0, len(text), size)]
 
 

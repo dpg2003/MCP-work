@@ -38,6 +38,7 @@ def test_stdout_contains_only_jsonrpc_under_mixed_traffic(client):
     requests: list[tuple[int | None, str]] = []
 
     def enqueue(params):
+        """Send one tools/call request and remember its id."""
         request_id = client.next_id()
         client.send({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": params})
         requests.append((request_id, "response"))

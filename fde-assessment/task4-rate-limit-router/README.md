@@ -4,6 +4,23 @@ A resilient LLM-gateway routing layer: a token-aware sliding-window rate limiter
 persisted in on-disk SQLite, automatic failover from a primary model provider to
 a secondary, and one standardized error shape for every failure.
 
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `app.py` | The HTTP gateway wiring limiter and router together. Entry point. |
+| `rate_limiter.py` | Sliding window log in SQLite, transactional admission, reconciliation |
+| `router.py` | Primary/secondary failover policy |
+| `providers.py` | Provider interface; normalises every upstream failure at the boundary |
+| `errors.py` | The single client-facing error shape |
+| `tokens_estimate.py` | Pre-flight token estimation |
+| `fake_upstream.py` | Fake primary/secondary endpoints with latency and failure injection |
+| `tests/test_rate_limiter.py` | Budgets, boundaries, eviction, persistence, races |
+| `tests/test_router.py` | Failover triggers, timeout precision, flapping, sanitisation |
+| `tests/test_gateway_e2e.py` | The three concerns together, over HTTP |
+
+See the [root README](../../README.md) for the per-function reference.
+
 ## Run it
 
 ```bash

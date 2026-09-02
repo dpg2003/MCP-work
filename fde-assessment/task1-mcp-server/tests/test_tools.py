@@ -21,6 +21,7 @@ def payload(response: dict) -> dict:
 
 
 def error(response: dict) -> dict:
+    """Extract the error object from a failed tools/call response."""
     assert "error" in response, response
     return response["error"]
 

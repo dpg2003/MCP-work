@@ -4,6 +4,20 @@ An MCP server speaking **stdio** that exposes two tools, `get_customer_record`
 and `trigger_refund`, with strict Pydantic validation on every input and
 guaranteed stdout purity.
 
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `server.py` | Tool definitions, request handlers, error-code mapping, stderr-only logging. Entry point. |
+| `models.py` | Strict Pydantic input models — one source of truth for validation *and* the advertised JSON Schemas |
+| `datastore.py` | Thread-safe in-memory customer store with seed fixtures |
+| `stdio_guard.py` | Read-stream wrapper that answers undecodable frames instead of dropping them |
+| `tests/conftest.py` | `StdioClient` — a raw JSON-RPC client that drives the server as a subprocess |
+| `tests/test_tools.py` | Validation and tool behaviour, over the wire |
+| `tests/test_transport.py` | stdout purity, malformed envelopes, pipelined concurrency |
+
+See the [root README](../../README.md) for the per-function reference.
+
 ## Run it
 
 ```bash

@@ -5,6 +5,19 @@ role-based tool filtering, and forwards everything else to a downstream MCP
 server. Unauthorized privileged calls are answered by the gateway itself — the
 downstream server is never contacted.
 
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `gateway.py` | The proxy: parsing, authorization, forwarding, upstream-error sanitisation. Entry point. |
+| `tokens.py` | HMAC-signed bearer tokens — issue, verify, header parsing. Also a `mint-token` CLI. |
+| `downstream.py` | Mock MCP server with a call log and failure injection |
+| `tests/conftest.py` | Wires the gateway to the mock downstream over an in-process ASGI transport |
+| `tests/test_gateway.py` | Policy, auth failures, malformed payloads, batches, downstream failures |
+| `tests/test_tokens.py` | The token scheme itself |
+
+See the [root README](../../README.md) for the per-function reference.
+
 ## Run it
 
 ```bash

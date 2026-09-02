@@ -9,4 +9,5 @@ from _collection_guard import check  # noqa: E402
 
 
 def pytest_configure(config):
+    """Refuse the run early if it spans more than one project."""
     check(config)

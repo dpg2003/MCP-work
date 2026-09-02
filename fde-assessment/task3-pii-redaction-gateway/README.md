@@ -4,6 +4,19 @@ A streaming LLM gateway that proxies a text-generation request and redacts
 emails, SSNs, and credit card numbers **in real time** — correctly even when a
 pattern is split across chunk boundaries, and without buffering the response.
 
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `redactor.py` | The sliding-buffer state machine — the core of the task |
+| `app.py` | FastAPI `StreamingResponse` endpoint and mid-stream failure handling. Entry point. |
+| `providers.py` | Mock, SSE-mock and real Anthropic providers behind one async-iterator interface |
+| `tests/conftest.py` | PII samples, chunking helpers, and a live-server context manager |
+| `tests/test_redactor.py` | Split-point coverage, false positives, unicode, memory bounds, the differential oracle |
+| `tests/test_gateway_stream.py` | HTTP streaming, TTFT, upstream failures |
+
+See the [root README](../../README.md) for the per-function reference.
+
 ## Run it
 
 ```bash

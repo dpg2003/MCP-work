@@ -83,6 +83,7 @@ DEFAULT_TIMEOUT_SECONDS = 5.0
 # JSON-RPC helpers
 # --------------------------------------------------------------------------
 def error_response(request_id: Any, code: int, message: str, data: Any = None) -> dict[str, Any]:
+    """Build a JSON-RPC error object, omitting ``data`` when there is none."""
     error: dict[str, Any] = {"code": code, "message": message}
     if data is not None:
         error["data"] = data
@@ -99,6 +100,11 @@ def _extract_id(message: Any) -> Any:
 
 
 def _looks_like_request(message: Any) -> bool:
+    """Whether ``message`` is structurally a JSON-RPC 2.0 request.
+
+    Checked before authorization so a malformed envelope is rejected as an
+    invalid request rather than being probed for a ``method`` it may not have.
+    """
     return (
         isinstance(message, dict)
         and message.get("jsonrpc") == "2.0"
@@ -191,6 +197,7 @@ def create_app(
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        """Own an httpx client for the app's lifetime, unless one was injected."""
         if app.state.client is None:
             app.state.client = httpx.AsyncClient(timeout=app.state.timeout_seconds)
         try:
@@ -210,10 +217,17 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
+        """Liveness probe. Does not touch the downstream server."""
         return {"status": "ok"}
 
     @app.post("/mcp")
     async def mcp(request: Request):
+        """Authenticate, authorize each message, forward what is permitted.
+
+        Handles single requests and batches through one code path: a batch is
+        just a list of messages, each authorized independently, with the
+        locally-rejected results merged back into the downstream responses.
+        """
         raw = await request.body()
         try:
             payload = json.loads(raw)
@@ -292,6 +306,14 @@ def create_app(
 
 
 class _UpstreamFailure(Exception):
+    """A downstream call that failed, split into what may and may not be shared.
+
+    ``public_reason`` is a fixed enum value safe to return to the client;
+    ``internal_detail`` carries the status code, exception text or response
+    body and goes only to the gateway's log. Keeping them as separate fields
+    is what makes it hard to leak the second by accident.
+    """
+
     def __init__(self, public_reason: str, internal_detail: str) -> None:
         super().__init__(public_reason)
         self.public_reason = public_reason

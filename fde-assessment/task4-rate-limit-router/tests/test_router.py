@@ -23,12 +23,14 @@ from router import DEFAULT_TIMEOUT_MS, ModelRouter
 
 @pytest.fixture
 def upstream():
+    """A fresh fake-provider app with both endpoints healthy."""
     fake_upstream.reset()
     return fake_upstream.create_app()
 
 
 @pytest.fixture
 async def upstream_url(upstream):
+    """The fake providers, served on a real socket."""
     async with live_server(upstream) as base_url:
         yield base_url
 
@@ -43,6 +45,7 @@ async def http_router(upstream_url):
 
 
 def set_mode(which: str, mode: str, latency: float = 0.0) -> None:
+    """Set one fake endpoint's failure mode and injected latency."""
     fake_upstream.STATE[which].update({"mode": mode, "latency_seconds": latency})
 
 
@@ -235,6 +238,7 @@ async def test_concurrent_requests_during_a_flap_all_resolve():
     router = ModelRouter(primary, secondary, timeout_ms=1000)
 
     async def one(index: int):
+        """Issue one request, flipping the primary's health on odd indices."""
         primary.error = ProviderRateLimited("primary", "429") if index % 2 else None
         return await router.complete(f"r{index}", 8)
 

@@ -35,6 +35,18 @@ class MockProvider:
     failure: Exception | None = None
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
+        """Yield the scripted chunks, optionally failing partway through.
+
+        Args:
+            prompt: Ignored; the response is scripted.
+
+        Yields:
+            Each configured chunk, after ``delay_seconds``.
+
+        Raises:
+            Exception: ``failure`` (default ``UpstreamStreamError``) once
+                ``fail_after`` chunks have been yielded.
+        """
         for index, chunk in enumerate(self.chunks):
             if self.fail_after is not None and index >= self.fail_after:
                 raise self.failure or UpstreamStreamError("upstream dropped the connection")
@@ -59,6 +71,16 @@ class SSEMockProvider:
     delay_seconds: float = 0.0
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:
+        """Parse the scripted SSE frames and yield their text deltas.
+
+        Yields:
+            The ``delta.text`` of each ``content_block_delta`` event, stopping
+            at ``[DONE]``.
+
+        Raises:
+            UpstreamStreamError: A frame's payload is not decodable JSON or is
+                not a JSON object -- the corrupt-frame failure mode.
+        """
         for frame in self.frames:
             if self.delay_seconds:
                 await asyncio.sleep(self.delay_seconds)
@@ -98,11 +120,18 @@ class AnthropicProvider:
     """Real Anthropic streaming. Requires ``ANTHROPIC_API_KEY``."""
 
     def __init__(self, model: str | None = None, max_tokens: int = 1024) -> None:
+        """Configure the model and output budget. The client is built lazily."""
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
         self.max_tokens = max_tokens
         self._client = None
 
     def _get_client(self):
+        """Build the Anthropic client on first use.
+
+        Deferred so that importing this module -- which the tests do -- never
+        requires an API key, and so a missing key surfaces as a normalised
+        ``UpstreamStreamError`` rather than an import-time crash.
+        """
         if self._client is None:
             try:
                 from anthropic import AsyncAnthropic
@@ -114,6 +143,15 @@ class AnthropicProvider:
         return self._client
 
     async def stream(self, prompt: str) -> AsyncIterator[str]:  # pragma: no cover - needs a key
+        """Stream text deltas from the Anthropic Messages API.
+
+        Yields:
+            Successive text deltas.
+
+        Raises:
+            UpstreamStreamError: Any provider failure, with only the exception
+                *type* retained, so no provider-specific message escapes.
+        """
         client = self._get_client()
         try:
             async with client.messages.stream(

@@ -38,6 +38,12 @@ ERROR_SENTINEL = "\n[gateway-error] upstream_stream_failed\n"
 
 
 class GenerateRequest(BaseModel):
+    """Request body for ``POST /v1/generate``.
+
+    The upper bound on ``prompt`` is a rejection, not a truncation: an
+    oversized prompt gets a 422 rather than being silently clipped.
+    """
+
     prompt: str = Field(min_length=1, max_length=100_000)
 
 
@@ -74,16 +80,30 @@ async def redacted_stream(
 
 
 def create_app(provider=None, max_hold: int = DEFAULT_MAX_HOLD) -> FastAPI:
+    """Build the gateway application.
+
+    Args:
+        provider: Upstream provider. Injectable so tests can script exact
+            chunk boundaries; defaults to the one named by ``LLM_PROVIDER``.
+        max_hold: Passed through to the redactor as the split-width guarantee.
+    """
     app = FastAPI(title="LLM gateway with PII redaction")
     app.state.provider = provider or provider_from_env()
     app.state.max_hold = max_hold
 
     @app.get("/healthz")
     async def healthz():
+        """Liveness probe, naming the active provider."""
         return {"status": "ok", "provider": type(app.state.provider).__name__}
 
     @app.post("/v1/generate")
     async def generate(request: GenerateRequest):
+        """Proxy a prompt upstream and stream the redacted response back.
+
+        A provider that fails *before* any bytes are sent still gets a real
+        502. Once streaming has begun the status is committed, so mid-stream
+        failures are handled inside :func:`redacted_stream` instead.
+        """
         try:
             source = app.state.provider.stream(request.prompt)
         except UpstreamStreamError as exc:

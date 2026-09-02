@@ -49,12 +49,24 @@ class InvalidToken(Exception):
 
 @dataclass(frozen=True)
 class Principal:
+    """A verified caller.
+
+    Frozen so an authorization decision cannot be undermined by mutating the
+    identity it was based on. Only ever produced by :func:`verify`, so holding
+    one is proof the token's signature, expiry and role all checked out.
+    """
+
     subject: str
     role: str
     expires_at: int
 
     @property
     def is_admin(self) -> bool:
+        """Whether this principal holds the privileged role.
+
+        An exact match against ``"admin"``. There is no hierarchy and no
+        superset role: anything else is not an admin.
+        """
         return self.role == ADMIN_ROLE
 
 
@@ -64,15 +76,22 @@ def get_secret() -> bytes:
 
 
 def _b64encode(raw: bytes) -> str:
+    """URL-safe base64 without ``=`` padding, so tokens stay header-safe."""
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
 def _b64decode(text: str) -> bytes:
+    """Inverse of :func:`_b64encode`, restoring the stripped padding."""
     padding = "=" * (-len(text) % 4)
     return base64.urlsafe_b64decode(text + padding)
 
 
 def _sign(payload_segment: str, secret: bytes) -> str:
+    """HMAC-SHA256 over the encoded payload segment.
+
+    Signing the *encoded* segment rather than the raw JSON avoids any
+    dependence on re-serialising the claims identically at verification time.
+    """
     digest = hmac.new(secret, payload_segment.encode("ascii"), sha256).digest()
     return _b64encode(digest)
 

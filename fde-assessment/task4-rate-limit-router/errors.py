@@ -48,6 +48,12 @@ _MESSAGES = {
 
 
 def new_request_id() -> str:
+    """Mint a correlation id.
+
+    Returned to the client and written to the logs, so a user can quote an id
+    from an error and an operator can find the full internal detail behind it
+    without any of that detail having been sent over the wire.
+    """
     return f"req_{uuid.uuid4().hex[:16]}"
 
 
@@ -61,6 +67,16 @@ class GatewayError(Exception):
         request_id: str | None = None,
         internal_detail: str | None = None,
     ) -> None:
+        """Create a gateway error.
+
+        Args:
+            error_type: One of the stable module-level type constants.
+            details: Gateway-owned facts safe to serialise. Never populate
+                this from an upstream response.
+            request_id: Correlation id; generated when omitted.
+            internal_detail: Diagnostics for the log only. Deliberately not
+                part of :meth:`to_payload`.
+        """
         self.error_type = error_type
         self.details = details or {}
         self.request_id = request_id or new_request_id()
@@ -70,9 +86,15 @@ class GatewayError(Exception):
 
     @property
     def http_status(self) -> int:
+        """HTTP status for this error type, defaulting to 500."""
         return _HTTP_STATUS.get(self.error_type, 500)
 
     def to_payload(self) -> dict[str, Any]:
+        """Serialise to the single client-facing error shape.
+
+        ``internal_detail`` is intentionally absent: it is the field that would
+        leak an upstream body or stack trace, so it has no path to the wire.
+        """
         return {
             "error": {
                 "type": self.error_type,

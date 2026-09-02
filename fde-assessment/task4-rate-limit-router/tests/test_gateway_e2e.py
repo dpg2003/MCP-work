@@ -19,6 +19,7 @@ ERROR_KEYS = {"type", "message", "request_id", "details"}
 
 @pytest.fixture
 def providers():
+    """A primary and secondary stub, each with its own call counter."""
     return StubProvider("primary", text="from-primary", tokens_used=120), StubProvider(
         "secondary", text="from-secondary", tokens_used=130
     )
@@ -26,6 +27,7 @@ def providers():
 
 @pytest.fixture
 def gateway(db_path, clock, providers):
+    """A gateway on a temporary database with stub providers attached."""
     primary, secondary = providers
     limiter = RateLimiter(db_path=db_path, clock=clock)
     app = create_app(
@@ -42,6 +44,7 @@ def gateway(db_path, clock, providers):
 
 @pytest.fixture
 async def client(gateway):
+    """An httpx client wired to the gateway app."""
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=gateway), base_url="http://gateway.test"
     ) as instance:
@@ -49,6 +52,7 @@ async def client(gateway):
 
 
 async def complete(client, prompt="hello world", max_tokens=64, key="key-acme"):
+    """POST one completion request with the given key and body."""
     headers = {"X-API-Key": key} if key else {}
     return await client.post(
         "/v1/complete", json={"prompt": prompt, "max_tokens": max_tokens}, headers=headers
@@ -56,6 +60,7 @@ async def complete(client, prompt="hello world", max_tokens=64, key="key-acme"):
 
 
 def assert_standard_error(response, error_type: str):
+    """Assert the response uses the one standard error shape, and return it."""
     body = response.json()
     assert set(body) == {"error"}, body
     assert set(body["error"]) == ERROR_KEYS, body
@@ -257,6 +262,7 @@ async def test_a_restarted_gateway_still_enforces_prior_usage(db_path, clock, pr
     primary, secondary = providers
 
     def build():
+        """Construct a gateway sharing the same database file."""
         limiter = RateLimiter(db_path=db_path, clock=clock)
         app = create_app(
             limiter=limiter,
