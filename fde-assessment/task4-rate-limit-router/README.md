@@ -139,108 +139,109 @@ provider's reported usage. Notes on the scheme:
 
 ## Failover policy
 
-| Primary outcome | Router behaviour |
+| Provider outcome | Router behaviour |
 | --- | --- |
-| Success | Return it. Secondary is never called (asserted by call count). |
-| HTTP 429 | Fail over to secondary. |
-| Timeout at the deadline (3000 ms default) | Fail over to secondary. |
-| Connection error / 5xx / undecodable body | Fail over to secondary. |
-| Non-retryable 4xx (not 429) | **No** failover — standardized error. |
+| Success | Return it. Later providers untouched. |
+| HTTP 429 | Retry once (cheap), then advance to the next provider. |
+| Connection error / 5xx / undecodable body | Retry once, then advance. |
+| Timeout at the deadline | Advance **immediately** — no retry. |
+| Non-retryable 4xx (not 429) | Stop. Another provider rejects it identically. |
 
-Connection errors and 5xx join the two required triggers because they mean the
-same thing operationally, and a router that fails over on a timeout but not on a
-connection refusal has a hole in it. A 4xx is different in kind: it is a
-statement about the *request*, so retrying elsewhere just burns the secondary's
-quota.
+**Why timeouts are not retried.** A timeout has already spent the entire
+deadline. Retrying it doubles what the client waits — 6 s on a 3 s budget — to
+re-ask a provider that just failed to answer. A 429 or a refused connection
+fails in milliseconds, so retrying *those* costs almost nothing and genuinely
+absorbs a blip. Worst-case latency is therefore one deadline per provider, not
+one per attempt, and `test_a_single_timeout_costs_one_deadline_not_two` holds it
+there.
 
-The deadline is enforced inside the provider (`httpx` timeout) rather than as a
-router-level `asyncio.wait_for`, so it covers connect, write, read, and
-pool-acquire time — and cancelling the task would otherwise leave the socket to
-be reaped later.
+**An ordered chain, not a hardcoded pair.** `ModelRouter(providers=[a, b, c, d])`
+walks the list in order. `primary` and `secondary` remain as properties, so
+callers written against the old shape are unaffected.
 
-**No circuit breaker, deliberately.** The router holds no health state, so a
-flapping primary cannot wedge it: every request re-evaluates from scratch and
-recovery is immediate. The cost is one failed attempt per request during a
-sustained outage. A test alternates the primary's health 200 times and asserts
-every request lands on the right provider, plus that the connection pool stays
-bounded across 150 failovers. At high volume this would be the thing to revisit
-— a breaker with a half-open probe — and it is a self-contained change because
-the router is the only thing that would need to know.
+## Circuit breaking
 
-## Standardized errors
+This is the fix for the defect that mattered most. The previous router held no
+health state, so a provider that was hard down was re-attempted on **every**
+request — meaning every request paid the full 3000 ms deadline for as long as
+the outage lasted. A three-second tax on 100% of traffic.
 
-Every failure — validation, auth, rate limit, upstream, and an unexpected
-internal exception — exits through `errors.GatewayError` and serializes as:
+Each provider now has a `CircuitBreaker`:
 
-```json
-{"error": {"type": "...", "message": "...", "request_id": "req_...", "details": {}}}
+| State | Behaviour |
+| --- | --- |
+| `CLOSED` | Normal. `failure_threshold` *consecutive* failures trip it open. |
+| `OPEN` | Calls refused in microseconds — no socket, no deadline to wait out. |
+| `HALF_OPEN` | After `recovery_seconds`, a limited probe is admitted. Success closes it; failure re-opens and restarts the clock. |
+
+Measured, with a 3 s deadline against a hard-down primary:
+
+```
+req 1:  3000 ms  via secondary  attempts=['primary:timeout', 'secondary:ok']
+req 2:  3000 ms  via secondary  attempts=['primary:timeout', 'secondary:ok']
+req 3:     0 ms  via secondary  attempts=['primary:circuit_open', 'secondary:ok']
+req 4:     0 ms  via secondary  attempts=['primary:circuit_open', 'secondary:ok']
 ```
 
-`details` is populated **only** from values the gateway itself computed.
-Provider-specific failures are normalised into gateway-owned exception types at
-the `providers.py` boundary, so nothing above that layer can even see an httpx
-exception, an upstream status code, or an upstream body — the guarantee is
-structural rather than a promise to remember. Upstream detail is logged against
-`request_id` and goes no further.
+Only *consecutive* failures count, so one success clears the tally and a blip
+never trips a healthy provider. A non-retryable 4xx is recorded as
+*indeterminate* — it describes the request, not the provider, so it neither
+trips a breaker nor clears a tally.
 
-The fake upstream returns a body containing a stack trace, a file path, an
-internal hostname, and an `sk-live-` API key fragment; tests assert none of it
-appears in any client response, on either the single-provider or
-both-providers-down path.
+**The test that would have caught the original defect** is
+`test_sustained_outage_latency_stays_far_below_the_deadline`. It asserts a
+*cost*, not a mechanism: steady-state latency during an outage must stay under
+a tenth of the deadline. Disabling the breaker fails it at **3.00 s against a
+0.30 s budget** — a defect no mechanism test in the old suite could see.
 
-## Performance
+## Rate limits: per tenant, multi-dimensional
 
-### Limiter throughput: 7,080 → 18,351 ops/s
+The limiter machinery was always sound; the product around it was not. It had
+one global limit for everybody and a two-entry plaintext key dict in source.
 
-- **Covering index** `(tenant, ts, tokens)` answers the hot `SUM` from the index
-  alone, without touching the table.
-- **Amortised eviction.** Deleting expired rows on every request was pure write
-  amplification: every read already filters on `ts > cutoff`, so an un-deleted
-  expired row cannot influence any answer. The `DELETE` is housekeeping, and
-  housekeeping does not need to run a thousand times a second.
+**Quotas are configuration now.** `tenants.py` resolves an API key to a
+`Tenant` carrying its own `Quota`. Tiers ship as `free` / `pro` / `enterprise`,
+per-tenant `overrides` cover negotiated limits, and `TENANTS_FILE` points at a
+JSON document — see [`examples/tenants.example.json`](../../examples/tenants.example.json).
+With nothing configured, a clearly-labelled demo registry is used and the
+service logs a warning.
 
-### Getting SQLite off the event loop: 647 → 1,956 req/s
+**Two dimensions, not one.** Tokens per minute *and* requests per minute, both
+over the same sliding window, answered by one query against the covering index
+so the second dimension costs no extra round trip. A tenant sending many tiny
+prompts exhausts a provider's connections long before it exhausts a token
+budget, so tokens alone were never sufficient. A refusal names which budget ran
+out (`"limit": "tokens"` or `"requests"`).
 
-Admission ran SQLite directly inside a coroutine, so a commit spike (28 ms
-observed) stalled *every* in-flight request on the worker, not just its own.
+**Keys are not recoverable.** Only a SHA-256 hash is stored, comparison is
+constant-time across every entry, and keys are never logged — only the tenant
+id they resolve to. Hashing is unsalted and unstretched deliberately: these are
+high-entropy machine-generated secrets, so there is no dictionary to defend
+against and per-request Argon2 would price every call. A test asserts a
+presented key appears in neither the response nor the logs.
 
-The obvious fix — `asyncio.to_thread` per call — measured **worse**: the thread
-hop costs ~260 µs against 54 µs of actual database work, making it slower than
-blocking, just politer.
-
-So the limiter uses **group commit**, the same technique a database WAL uses.
-Concurrent admissions queue; one worker drains the whole group and hands it to a
-single thread, which decides the batch inside one transaction. Sixty-four
-requests pay one hop and one commit instead of sixty-four of each — so throughput
-*improves* with concurrency instead of collapsing.
-
-| Concurrency | Throughput | p50 | p99 |
-| --- | --- | --- | --- |
-| 4 | 1,500 req/s | 1.9 ms | 3.6 ms |
-| 16 | 1,934 req/s | 4.8 ms | 9.2 ms |
-| 64 | 1,985 req/s | 16.0 ms | 49.9 ms |
-
-Before: 647 req/s at concurrency 64, p50 95 ms, p99 152 ms.
-
-**Semantics are unchanged.** `try_consume_many` decides a batch in arrival order,
-each request against the running total including everything admitted earlier in
-the same batch — exactly what sequential calls produce. The in-memory running
-total is exact rather than approximate because `BEGIN IMMEDIATE` holds the write
-lock for the whole transaction. `tests/test_admission.py` asserts this against a
-serial oracle over 500 randomised batches, and separately asserts the limit is
-never exceeded under concurrency.
-
-A lone request is never delayed waiting for a batch that may not arrive: the
-worker takes whatever is *already* queued and dispatches immediately.
+**Token estimation is pluggable and script-aware.** The default heuristic
+charges Latin text at ~4 characters per token and non-Latin (CJK, emoji) far
+more densely, because 4:1 under-charges those by roughly 4x. `max_tokens` is
+reserved in full, so tiny prompts with huge output budgets cannot slip past.
+An exact tokenizer is deliberately *not* the default — Anthropic's counting is
+a network call, and putting a round trip in front of every admission decision
+to then fail closed when it is slow is the wrong trade. The estimate errs high
+and is reconciled against real usage within milliseconds.
 
 ## Operational surface
 
 - **`/healthz`** — liveness. Cheap and dependency-free, because a probe that
   fails on a downstream blip makes an orchestrator restart a healthy pod.
-- **`/readyz`** — readiness. Touches the database admission depends on, and
-  returns 503 so the instance leaves rotation rather than serving errors. The two
+- **`/readyz`** — readiness. Checks the database admission depends on *and*
+  provider health: if every breaker is open the instance is up but cannot
+  serve, so it returns 503 and leaves rotation rather than serving errors. The two
   are deliberately independent, and a test asserts liveness still passes when
   readiness fails.
+- **`/v1/providers`** — per-provider breaker state: which providers are being
+  skipped and how long until the next probe, so an outage is visible without
+  reading logs.
+- **`/v1/quota`** — the calling tenant's own tier, limits and window usage.
 - **Bounded provider pool** (100 connections, 20 keep-alive).
 - **Graceful shutdown** drains the group-commit workers on lifespan exit, with a
   test asserting no accepted admission is lost.

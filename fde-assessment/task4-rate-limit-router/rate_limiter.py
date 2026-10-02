@@ -68,7 +68,11 @@ CREATE INDEX IF NOT EXISTS idx_token_usage_tenant_ts
 
 @dataclass(frozen=True)
 class Decision:
-    """Outcome of an admission check."""
+    """Outcome of an admission check.
+
+    Carries both enforced dimensions so a client can tell *which* budget it
+    exhausted; ``reason`` names it directly.
+    """
 
     allowed: bool
     tenant: str
@@ -77,11 +81,21 @@ class Decision:
     limit_tokens: int
     retry_after_seconds: float | None = None
     reservation_id: int | None = None
+    used_requests: int = 0
+    limit_requests: int | None = None
+    reason: str | None = None   # "tokens" or "requests" when refused
 
     @property
     def remaining_tokens(self) -> int:
         """Tokens still available in the window, floored at zero."""
         return max(0, self.limit_tokens - self.used_tokens)
+
+    @property
+    def remaining_requests(self) -> int | None:
+        """Requests still available in the window, or ``None`` if uncapped."""
+        if self.limit_requests is None:
+            return None
+        return max(0, self.limit_requests - self.used_requests)
 
 
 class RateLimiter:
@@ -92,6 +106,7 @@ class RateLimiter:
         db_path: str,
         limit_tokens: int = DEFAULT_LIMIT_TOKENS,
         window_seconds: float = DEFAULT_WINDOW_SECONDS,
+        limit_requests: int | None = None,
         clock: Callable[[], float] | None = None,
         evict_interval_seconds: float = DEFAULT_EVICT_INTERVAL_SECONDS,
     ) -> None:
@@ -101,8 +116,12 @@ class RateLimiter:
             db_path: On-disk database file. State persists here across
                 restarts, which is what makes the limit meaningful behind
                 more than one worker.
-            limit_tokens: Budget per tenant per window.
+            limit_tokens: Default token budget, used when a call supplies no
+                per-tenant quota.
             window_seconds: Length of the sliding window.
+            limit_requests: Default request-count budget. ``None`` leaves the
+                request dimension unenforced, which is the behaviour callers
+                that predate per-tenant quotas rely on.
             clock: Time source, injectable so window eviction can be tested
                 without sleeping for a real minute.
             evict_interval_seconds: How often expired rows are actually
@@ -110,6 +129,7 @@ class RateLimiter:
         """
         self.db_path = db_path
         self.limit_tokens = limit_tokens
+        self.limit_requests = limit_requests
         self.window_seconds = window_seconds
         # Injectable so window-eviction can be tested without sleeping 60s.
         self.clock = clock or time.time
@@ -139,6 +159,32 @@ class RateLimiter:
         """Close the database connection. Persisted state is unaffected."""
         self._conn.close()
 
+    # -- limits -------------------------------------------------------------
+    def _limits_for(self, quota) -> tuple[int, int | None]:
+        """Resolve the limits that apply to one call.
+
+        A per-tenant :class:`~tenants.Quota` wins; otherwise the limiter's own
+        defaults apply, which is what keeps single-limit callers working.
+        """
+        if quota is None:
+            return self.limit_tokens, self.limit_requests
+        return quota.tokens_per_minute, quota.requests_per_minute
+
+    @staticmethod
+    def _window_usage(conn, tenant: str, cutoff: float) -> tuple[int, int]:
+        """Tokens and request count for a tenant inside the window.
+
+        One query for both dimensions: the covering index answers it without
+        touching the table, so adding the request limit cost no extra round
+        trip.
+        """
+        row = conn.execute(
+            "SELECT COALESCE(SUM(tokens), 0), COUNT(*) FROM token_usage "
+            "WHERE tenant = ? AND ts > ?",
+            (tenant, cutoff),
+        ).fetchone()
+        return row[0], row[1]
+
     # -- core ---------------------------------------------------------------
     def _maybe_evict(self, conn, now: float, cutoff: float) -> None:
         """Delete expired rows, but at most once per ``_evict_interval``.
@@ -154,14 +200,25 @@ class RateLimiter:
         conn.execute("DELETE FROM token_usage WHERE ts <= ?", (cutoff,))
         self._last_evict = now
 
-    def try_consume(self, tenant: str, tokens: int) -> Decision:
+    def try_consume(self, tenant: str, tokens: int, quota=None) -> Decision:
         """Atomically evict, sum, decide, and record.
 
-        Allows when ``used + tokens <= limit`` — so exactly the limit is
-        admitted and one token over is not.
+        Allows when the request fits *both* budgets: ``used + tokens <= limit``
+        (so exactly the limit is admitted and one token over is not) and, when
+        a request limit applies, ``requests + 1 <= limit_requests``.
+
+        Args:
+            tenant: Tenant id.
+            tokens: Estimated cost to reserve.
+            quota: Per-tenant :class:`~tenants.Quota`. Omitted, the limiter's
+                own defaults apply.
+
+        Raises:
+            ValueError: ``tokens`` is negative.
         """
         if tokens < 0:
             raise ValueError("tokens must be non-negative")
+        limit_tokens, limit_requests = self._limits_for(quota)
 
         with self._lock:
             now = self.clock()
@@ -170,21 +227,30 @@ class RateLimiter:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 self._maybe_evict(conn, now, cutoff)
-                used = conn.execute(
-                    "SELECT COALESCE(SUM(tokens), 0) FROM token_usage WHERE tenant = ? AND ts > ?",
-                    (tenant, cutoff),
-                ).fetchone()[0]
+                used, requests = self._window_usage(conn, tenant, cutoff)
 
-                if used + tokens > self.limit_tokens:
-                    retry_after = self._retry_after(conn, tenant, cutoff, now, tokens, used)
+                refusal = None
+                if used + tokens > limit_tokens:
+                    refusal = "tokens"
+                elif limit_requests is not None and requests + 1 > limit_requests:
+                    refusal = "requests"
+
+                if refusal is not None:
+                    retry_after = self._retry_after(
+                        conn, tenant, cutoff, now, tokens, used,
+                        limit_tokens=limit_tokens, by_requests=refusal == "requests",
+                    )
                     conn.execute("COMMIT")
                     return Decision(
                         allowed=False,
                         tenant=tenant,
                         requested_tokens=tokens,
                         used_tokens=used,
-                        limit_tokens=self.limit_tokens,
+                        limit_tokens=limit_tokens,
                         retry_after_seconds=retry_after,
+                        used_requests=requests,
+                        limit_requests=limit_requests,
+                        reason=refusal,
                     )
 
                 cursor = conn.execute(
@@ -202,8 +268,10 @@ class RateLimiter:
                 tenant=tenant,
                 requested_tokens=tokens,
                 used_tokens=used + tokens,
-                limit_tokens=self.limit_tokens,
+                limit_tokens=limit_tokens,
                 reservation_id=reservation_id,
+                used_requests=requests + 1,
+                limit_requests=limit_requests,
             )
 
     def reconcile(self, reservation_id: int, actual_tokens: int,
@@ -258,7 +326,7 @@ class RateLimiter:
         self.reconcile(reservation_id, 0)
 
     # -- batch primitives ---------------------------------------------------
-    def try_consume_many(self, requests: list[tuple[str, int]]) -> list[Decision]:
+    def try_consume_many(self, requests: list[tuple]) -> list[Decision]:
         """Decide a batch of admissions in one transaction, in arrival order.
 
         Semantically identical to calling :meth:`try_consume` once per entry in
@@ -280,9 +348,13 @@ class RateLimiter:
         Raises:
             ValueError: Any entry requests a negative number of tokens.
         """
-        if any(tokens < 0 for _, tokens in requests):
+        # Entries are (tenant, tokens) or (tenant, tokens, quota); normalise so
+        # the batch path and the single path enforce identical rules.
+        normalised = [(entry[0], entry[1], entry[2] if len(entry) > 2 else None)
+                      for entry in requests]
+        if any(tokens < 0 for _, tokens, _ in normalised):
             raise ValueError("tokens must be non-negative")
-        if not requests:
+        if not normalised:
             return []
 
         with self._lock:
@@ -293,29 +365,40 @@ class RateLimiter:
             try:
                 self._maybe_evict(conn, now, cutoff)
 
-                # One SUM per distinct tenant, not one per request.
+                # One read per distinct tenant, not one per request.
                 used: dict[str, int] = {}
-                for tenant in {tenant for tenant, _ in requests}:
-                    used[tenant] = conn.execute(
-                        "SELECT COALESCE(SUM(tokens), 0) FROM token_usage "
-                        "WHERE tenant = ? AND ts > ?",
-                        (tenant, cutoff),
-                    ).fetchone()[0]
+                counts: dict[str, int] = {}
+                for tenant in {tenant for tenant, _, _ in normalised}:
+                    used[tenant], counts[tenant] = self._window_usage(conn, tenant, cutoff)
 
                 decisions: list[Decision] = []
-                for tenant, tokens in requests:
+                for tenant, tokens, quota in normalised:
+                    limit_tokens, limit_requests = self._limits_for(quota)
                     current = used[tenant]
-                    if current + tokens > self.limit_tokens:
+                    requests_so_far = counts[tenant]
+
+                    refusal = None
+                    if current + tokens > limit_tokens:
+                        refusal = "tokens"
+                    elif limit_requests is not None and requests_so_far + 1 > limit_requests:
+                        refusal = "requests"
+
+                    if refusal is not None:
                         decisions.append(
                             Decision(
                                 allowed=False,
                                 tenant=tenant,
                                 requested_tokens=tokens,
                                 used_tokens=current,
-                                limit_tokens=self.limit_tokens,
+                                limit_tokens=limit_tokens,
                                 retry_after_seconds=self._retry_after(
-                                    conn, tenant, cutoff, now, tokens, current
+                                    conn, tenant, cutoff, now, tokens, current,
+                                    limit_tokens=limit_tokens,
+                                    by_requests=refusal == "requests",
                                 ),
+                                used_requests=requests_so_far,
+                                limit_requests=limit_requests,
+                                reason=refusal,
                             )
                         )
                         continue
@@ -324,14 +407,17 @@ class RateLimiter:
                         (tenant, now, tokens),
                     )
                     used[tenant] = current + tokens
+                    counts[tenant] = requests_so_far + 1
                     decisions.append(
                         Decision(
                             allowed=True,
                             tenant=tenant,
                             requested_tokens=tokens,
                             used_tokens=used[tenant],
-                            limit_tokens=self.limit_tokens,
+                            limit_tokens=limit_tokens,
                             reservation_id=cursor.lastrowid,
+                            used_requests=counts[tenant],
+                            limit_requests=limit_requests,
                         )
                     )
                 conn.execute("COMMIT")
@@ -395,9 +481,9 @@ class RateLimiter:
     # The thread hop costs tens of microseconds, which is noise next to the
     # upstream model call the limiter is guarding.
 
-    async def try_consume_async(self, tenant: str, tokens: int) -> Decision:
+    async def try_consume_async(self, tenant: str, tokens: int, quota=None) -> Decision:
         """Off-loop :meth:`try_consume`."""
-        return await asyncio.to_thread(self.try_consume, tenant, tokens)
+        return await asyncio.to_thread(self.try_consume, tenant, tokens, quota)
 
     async def reconcile_async(self, reservation_id: int, actual_tokens: int,
                               tenant: str | None = None) -> int | None:
@@ -428,17 +514,26 @@ class RateLimiter:
 
     # -- helpers ------------------------------------------------------------
     def _retry_after(self, conn, tenant: str, cutoff: float, now: float,
-                     tokens: int, used: int) -> float:
-        """Seconds until enough usage ages out for this request to fit.
+                     tokens: int, used: int, limit_tokens: int | None = None,
+                     by_requests: bool = False) -> float:
+        """Seconds until the refused request would fit.
 
-        Walks the tenant's rows oldest-first, accumulating what expires, and
-        returns when the freed amount is sufficient.
+        For a token refusal, walks the tenant's rows oldest-first and returns
+        when enough usage has aged out. For a request-count refusal the size of
+        each row is irrelevant -- one slot frees the moment the oldest row
+        expires -- so that is what gets reported.
         """
-        need = used + tokens - self.limit_tokens
         rows = conn.execute(
             "SELECT ts, tokens FROM token_usage WHERE tenant = ? AND ts > ? ORDER BY ts ASC",
             (tenant, cutoff),
         ).fetchall()
+        if not rows:
+            return 0.0
+        if by_requests:
+            return max(0.0, round(rows[0][0] + self.window_seconds - now, 3))
+
+        ceiling = self.limit_tokens if limit_tokens is None else limit_tokens
+        need = used + tokens - ceiling
         freed = 0
         for ts, row_tokens in rows:
             freed += row_tokens

@@ -30,19 +30,19 @@ Extra arguments pass through to pytest (`./run_tests.sh -x -k redact`).
 
 ```
 ===== documentation coverage =====
-source           183/ 183 (100.0%)  [enforced]
-test support     103/ 103 (100.0%)  [enforced]
-test functions   256/ 256 (100.0%)  [enforced]
+source           228/ 228 (100.0%)  [enforced]
+test support     122/ 122 (100.0%)  [enforced]
+test functions   331/ 331 (100.0%)  [enforced]
 documentation check passed
 ===== task1-mcp-server =====        54 passed
 ===== task2-security-gateway =====  84 passed
-===== task3-pii-redaction-gateway = 253 passed
-===== task4-rate-limit-router ===== 100 passed
+===== task3-pii-redaction-gateway = 271 passed
+===== task4-rate-limit-router ===== 175 passed
 ===== summary =====
 all suites passed
 ```
 
-**491 tests, no network access and no API key required.**
+**584 tests, no network access and no API key required.**
 
 Separately, [`ASSESSMENT_RESULTS.md`](ASSESSMENT_RESULTS.md) is the assessment
 test-case document filled in by measurement rather than by hand — all **54 of 54
@@ -61,8 +61,8 @@ pytest                    # test it
 | --- | --- | --- |
 | `task1-mcp-server` | `python server.py` | 54 |
 | `task2-security-gateway` | `uvicorn downstream:app --port 9001` + `uvicorn gateway:app --port 9000` | 84 |
-| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 253 |
-| `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 100 |
+| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 271 |
+| `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 175 |
 
 ---
 
@@ -346,6 +346,73 @@ config (they are JSONC, so a plain JSON parser is not enough) and verifies that
 every path they reference exists and every referenced script is executable.
 Without it those files rot silently — a moved directory leaves a task that fails
 only when someone tries to use it. It runs as part of `./run_tests.sh`.
+
+---
+
+## Production review and what it changed
+
+An assessment review flagged three things. Two were valid, and the third named
+a real gap even though the literal claim did not reproduce. All three are fixed.
+
+### Model fallback: no circuit breaker
+
+The worst of the three, and one I had documented and shipped anyway. The router
+held no health state, so a hard-down provider was re-attempted on **every**
+request — every client paying the full 3000 ms deadline for the duration of the
+outage. Each provider now has a circuit breaker; a dead provider is skipped in
+microseconds and probed once per recovery window.
+
+```
+before:  every request  3000 ms    after:  req 1-2  3000 ms
+                                           req 3+      0 ms
+```
+
+Also: an ordered N-provider chain rather than a hardcoded pair; retries for
+*cheap* failures (429, connection refused) but **not** for timeouts, since a
+timeout has already spent the budget and retrying it doubles the client's wait;
+and `/v1/providers` exposing breaker state.
+
+### Rate limits: one global limit, plaintext keys
+
+Every tenant shared a single 50,000 token budget and the key store was a
+two-entry plaintext dict in source. Now: per-tenant quotas from configuration
+with tiers and overrides, a second enforced dimension (requests/minute
+alongside tokens/minute), SHA-256-hashed keys compared in constant time and
+never logged, and a script-aware pluggable token estimator.
+
+### PII guardrail: the provider path was never tested
+
+`AnthropicProvider.stream` was marked `# pragma: no cover` and had never
+executed — every other test drove a mock. The redaction *algorithm* was well
+covered, but the integration an operator actually uses was not, and the default
+served the fixture even when an API key was present. The SDK client is now
+injected so the real method is testable, the pragma is gone, 19 contract tests
+drive it, and a present key selects the real provider.
+
+### The lesson about the tests
+
+The old suite could not have caught any of this. Every test verified a design
+decision I had already made, so 491 of them passed on a design with a
+three-second outage tax and a single shared quota. Coverage says which lines
+ran, not whether the right lines exist — and I had explicitly excluded the one
+path that mattered from the measurement.
+
+The new tests assert **costs**, not mechanisms:
+
+| Test | Budget | Old design |
+| --- | --- | --- |
+| `test_sustained_outage_latency_stays_far_below_the_deadline` | < 0.30 s | **3.00 s — fails** |
+| `test_a_single_timeout_costs_one_deadline_not_two` | < 1.6 × deadline | 2 × deadline |
+| `test_the_limiter_applies_each_tenants_own_token_budget` | per-tenant | one global limit |
+
+**On coverage exclusions.** The one that mattered is gone: no feature path is
+excluded from measurement any more. Eight remain, and they are a different
+category — three `if __name__ == "__main__"` entry points, three shutdown/
+cancellation races in the admission worker, one unreachable ordering branch,
+and one attribute passthrough. They are listed here rather than left for
+someone to find, because "it is only defensive" is exactly the reasoning that
+let a whole provider integration go untested. If one of those ever guards real
+behaviour, it needs a test, not a comment.
 
 ---
 

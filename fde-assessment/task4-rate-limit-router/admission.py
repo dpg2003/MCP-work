@@ -139,9 +139,17 @@ class AdmissionController:
         self._admissions = _GroupCommitQueue(limiter.try_consume_many, "admission", max_batch)
         self._reconciles = _GroupCommitQueue(limiter.reconcile_many, "reconcile", max_batch)
 
-    async def try_consume(self, tenant: str, tokens: int) -> Decision:
-        """Admit or reject one request, batched with whatever else is pending."""
-        return await self._admissions.submit((tenant, tokens))
+    async def try_consume(self, tenant: str, tokens: int, quota=None) -> Decision:
+        """Admit or reject one request, batched with whatever else is pending.
+
+        Args:
+            tenant: Tenant id.
+            tokens: Estimated cost to reserve.
+            quota: The tenant's :class:`~tenants.Quota`. Carried through the
+                batch so every request in a group is judged against its *own*
+                tenant's limits, not a shared default.
+        """
+        return await self._admissions.submit((tenant, tokens, quota))
 
     async def reconcile(self, reservation_id: int, actual_tokens: int,
                         tenant: str | None = None) -> int | None:

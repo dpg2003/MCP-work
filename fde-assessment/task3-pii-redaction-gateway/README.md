@@ -210,6 +210,43 @@ first byte, so when something fails mid-stream that id is the only thing a user
 can quote — it is stamped on the failure log line, and a test asserts the two
 match.
 
+## The provider integration
+
+The redaction algorithm was always well covered — every secret split at every
+interior position, and character by character. What was **not** covered was the
+only class that runs in production.
+
+`AnthropicProvider.stream` was marked `# pragma: no cover - needs a key` and
+had never executed. Every one of the other tests drove a mock. So "253 tests
+passing" said nothing about the integration an operator actually uses, and the
+guardrail had never been demonstrated against a real provider response.
+
+Two changes close that:
+
+- **The SDK client is injected** (`client_factory`), so `stream()` itself is
+  testable. The pragma is gone. `tests/test_anthropic_contract.py` drives that
+  exact method — its own `async with`, its iteration over `text_stream`, its
+  error normalisation — against a stub implementing the SDK's streaming
+  surface. If a future SDK release changes that shape, these fail, which is the
+  point: they are a contract, not a mock of our own code. They also assert the
+  model id and output budget actually sent, sweep delta widths from 1 to 8
+  characters, and check that a mid-stream failure still flushes a *redacted*
+  tail.
+- **The default follows the environment.** With `LLM_PROVIDER` unset, a present
+  `ANTHROPIC_API_KEY` now selects the real provider. Previously the documented
+  run command served the scripted fixture even when a key was available, so
+  nothing an operator saw exercised a real provider response. With no key it
+  still falls back to the mock — and logs a warning saying so.
+
+Verify it yourself:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+uvicorn app:app --port 8000
+curl -sN -X POST localhost:8000/v1/generate -H 'content-type: application/json' \
+  -d '{"prompt":"Write a short fake support note containing a made-up email address, a made-up US SSN, and a made-up Visa card number."}'
+```
+
 ## Key design tradeoff
 
 The interesting choice was **adaptive hold-back versus a fixed tail window**. A

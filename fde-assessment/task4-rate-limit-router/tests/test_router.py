@@ -71,7 +71,9 @@ async def test_primary_429_triggers_failover(http_router):
     assert routed.provider_used == "secondary"
     assert routed.failed_over is True
     assert routed.completion.text.startswith("[secondary]")
-    assert http_router.primary.call_count == 1
+    # The primary is retried before the chain advances, so the count is the
+    # configured attempt budget rather than one.
+    assert http_router.primary.call_count == http_router.attempts_per_provider
     assert http_router.secondary.call_count == 1
 
 
@@ -80,6 +82,8 @@ async def test_primary_timeout_triggers_failover(http_router):
     set_mode("primary", "hang")
     routed = await asyncio.wait_for(http_router.complete("hello", 32), timeout=10)
     assert routed.provider_used == "secondary"
+    # A timeout is not retried: the first attempt already spent the whole
+    # deadline, so retrying it would double what the client waits.
     assert routed.attempts == ["primary:timeout", "secondary:ok"]
 
 
@@ -88,7 +92,8 @@ async def test_primary_500_triggers_failover(http_router):
     set_mode("primary", "500")
     routed = await http_router.complete("hello", 32)
     assert routed.provider_used == "secondary"
-    assert routed.attempts == ["primary:unavailable", "secondary:ok"]
+    assert routed.attempts[-1] == "secondary:ok"
+    assert all(a.startswith("primary:unavailable") for a in routed.attempts[:-1])
 
 
 async def test_primary_undecodable_body_triggers_failover(http_router):
@@ -182,7 +187,9 @@ async def test_both_providers_failing_gives_one_standardized_error(http_router):
     assert set(payload) == {"error"}
     assert set(payload["error"]) == {"type", "message", "request_id", "details"}
     assert payload["error"]["type"] == UPSTREAM_UNAVAILABLE
-    assert payload["error"]["details"]["attempts"] == ["primary:rate_limited", "secondary:unavailable"]
+    attempts = payload["error"]["details"]["attempts"]
+    assert attempts[0].startswith("primary:rate_limited")
+    assert attempts[-1].startswith("secondary:unavailable")
 
 
 async def test_both_providers_timing_out_gives_the_same_shape(http_router):
@@ -191,10 +198,9 @@ async def test_both_providers_timing_out_gives_the_same_shape(http_router):
     set_mode("secondary", "hang")
     with pytest.raises(GatewayError) as raised:
         await asyncio.wait_for(http_router.complete("hello", 32), timeout=10)
-    assert raised.value.to_payload()["error"]["details"]["attempts"] == [
-        "primary:timeout",
-        "secondary:timeout",
-    ]
+    attempts = raised.value.to_payload()["error"]["details"]["attempts"]
+    assert {a.split(":")[0] for a in attempts} == {"primary", "secondary"}
+    assert all(a.endswith("timeout") for a in attempts)
 
 
 async def test_no_upstream_detail_leaks_from_either_provider(http_router):
@@ -241,8 +247,10 @@ async def test_flapping_does_not_leak_connections(upstream_url):
         # Sockets are pooled and reused, not accumulated one per failover.
         pool = client._transport._pool
         assert len(pool.connections) < 20, f"{len(pool.connections)} pooled connections"
-        # And the router itself holds no per-request state that could grow.
-        assert set(vars(router)) == {"primary", "secondary", "timeout_ms"}
+        # The router's state is bounded: one breaker per provider, created at
+        # construction. It must not grow with traffic.
+        assert set(router.breakers) == {"primary", "secondary"}
+        assert len(router.breakers) == len(router.providers) == 2
 
 
 async def test_concurrent_requests_during_a_flap_all_resolve():
@@ -259,3 +267,118 @@ async def test_concurrent_requests_during_a_flap_all_resolve():
     results = await asyncio.gather(*[one(index) for index in range(50)])
     assert len(results) == 50
     assert all(r.completion.text in {"ok", "backup"} for r in results)
+
+
+# --------------------------------------------------------------------------
+# An ordered chain, not a hardcoded pair
+# --------------------------------------------------------------------------
+async def test_a_chain_of_more_than_two_providers_is_walked_in_order():
+    """Two providers was a special case of a list; the list costs nothing."""
+    from circuit_breaker import BreakerPolicy
+
+    down = [StubProvider(f"p{i}", error=ProviderTimeout(f"p{i}", "down")) for i in range(3)]
+    up = StubProvider("p3", text="served")
+    router = ModelRouter(providers=[*down, up], timeout_ms=500,
+                         attempts_per_provider=1,
+                         breaker_policy=BreakerPolicy(failure_threshold=99,
+                                                      recovery_seconds=60))
+    routed = await router.complete("x", 8)
+    assert routed.provider_used == "p3"
+    assert routed.failed_over is True
+    assert [a.split(":")[0] for a in routed.attempts] == ["p0", "p1", "p2", "p3"]
+
+
+async def test_a_single_provider_chain_is_valid():
+    """Not every deployment has a second provider to fall back to."""
+    router = ModelRouter(providers=[StubProvider("only", text="ok")], timeout_ms=500)
+    assert (await router.complete("x", 8)).provider_used == "only"
+    assert router.secondary is None
+
+
+async def test_an_empty_chain_is_refused_at_construction():
+    """A router with nothing to route to should fail loudly, not at request time."""
+    with pytest.raises(ValueError):
+        ModelRouter(providers=[])
+
+
+async def test_a_non_positive_attempt_budget_is_refused():
+    """An attempt budget of zero would never call anything; reject it at construction."""
+    with pytest.raises(ValueError):
+        ModelRouter(StubProvider("p"), attempts_per_provider=0)
+
+
+async def test_primary_and_secondary_still_name_the_first_two():
+    """Backwards compatibility for callers written against the old shape."""
+    first, second = StubProvider("a"), StubProvider("b")
+    router = ModelRouter(providers=[first, second, StubProvider("c")])
+    assert router.primary is first
+    assert router.secondary is second
+
+
+async def test_a_cheap_transient_failure_is_retried_before_advancing():
+    """A 429 fails in milliseconds, so retrying it absorbs a blip for free."""
+    flaky = StubProvider("primary", text="recovered")
+    calls = {"n": 0}
+    original = flaky.complete
+
+    async def sometimes(prompt, max_tokens):
+        """Fail the first call only, with a cheap failure."""
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ProviderRateLimited("primary", "429")
+        return await original(prompt, max_tokens)
+
+    flaky.complete = sometimes
+    router = ModelRouter(flaky, StubProvider("secondary", text="backup"),
+                         timeout_ms=500, attempts_per_provider=2)
+    routed = await router.complete("x", 8)
+    assert routed.provider_used == "primary", "a retry should have recovered it"
+    assert routed.failed_over is False
+    assert routed.completion.text == "recovered"
+
+
+async def test_health_reports_every_provider():
+    """On-call needs to see which providers are being skipped."""
+    router = ModelRouter(StubProvider("a"), StubProvider("b"), timeout_ms=500)
+    health = router.health()
+    assert [p["provider"] for p in health["providers"]] == ["a", "b"]
+    assert health["available"] == ["a", "b"]
+    assert health["timeout_ms"] == 500
+
+
+async def test_reset_breakers_returns_every_provider_to_service():
+    """An operator needs a way to force a provider back without a restart."""
+    from circuit_breaker import BreakerPolicy
+
+    dead = StubProvider("primary", error=ProviderTimeout("primary", "down"))
+    router = ModelRouter(dead, StubProvider("secondary"), timeout_ms=500,
+                         attempts_per_provider=1,
+                         breaker_policy=BreakerPolicy(failure_threshold=1,
+                                                      recovery_seconds=600))
+    await router.complete("x", 8)
+    assert router.health()["providers"][0]["state"] == "open"
+    router.reset_breakers()
+    assert router.health()["providers"][0]["state"] == "closed"
+
+
+async def test_a_single_timeout_costs_one_deadline_not_two():
+    """The retry policy's whole justification, asserted.
+
+    Retrying a timeout would make one slow provider cost the client two full
+    deadlines before it ever reached the secondary. The budget here is one
+    deadline plus a margin.
+    """
+    deadline = 1.0
+    slow = StubProvider("primary", error=ProviderTimeout("primary", "timed out"),
+                        delay_seconds=deadline)
+    router = ModelRouter(slow, StubProvider("secondary", text="ok"),
+                         timeout_ms=int(deadline * 1000), attempts_per_provider=2)
+    started = time.perf_counter()
+    routed = await router.complete("x", 8)
+    elapsed = time.perf_counter() - started
+    assert routed.provider_used == "secondary"
+    assert elapsed < deadline * 1.6, (
+        f"failover took {elapsed:.2f}s against a {deadline:.0f}s deadline - "
+        "a timeout is being retried"
+    )
+    assert slow.call_count == 1, "a timeout must not be retried"

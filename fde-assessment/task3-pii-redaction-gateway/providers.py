@@ -17,8 +17,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
+
+
+logger = logging.getLogger("fde.providers")
 
 
 class UpstreamStreamError(Exception):
@@ -117,40 +121,68 @@ DEFAULT_SCRIPT = [
 
 
 class AnthropicProvider:
-    """Real Anthropic streaming. Requires ``ANTHROPIC_API_KEY``."""
+    """Real Anthropic streaming. Requires ``ANTHROPIC_API_KEY``.
 
-    def __init__(self, model: str | None = None, max_tokens: int = 1024) -> None:
-        """Configure the model and output budget. The client is built lazily."""
+    The SDK client is supplied by ``client_factory`` rather than constructed
+    inline. That is what makes this class testable: the previous version built
+    its own client, so the only code path that runs in production could not be
+    exercised at all and was marked ``# pragma: no cover``. It is now covered by
+    contract tests that drive this exact method against a stub implementing the
+    SDK's streaming surface.
+    """
+
+    def __init__(self, model: str | None = None, max_tokens: int = 1024,
+                 client_factory=None) -> None:
+        """Configure the model and output budget; the client is built lazily.
+
+        Args:
+            model: Model id. Defaults to ``ANTHROPIC_MODEL``, then
+                ``claude-sonnet-5``.
+            max_tokens: Output budget for the request.
+            client_factory: Zero-argument callable returning an object shaped
+                like ``anthropic.AsyncAnthropic``. Injected by the contract
+                tests; production leaves it unset.
+        """
         self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
         self.max_tokens = max_tokens
+        self._client_factory = client_factory
         self._client = None
 
     def _get_client(self):
-        """Build the Anthropic client on first use.
+        """Build the client on first use.
 
-        Deferred so that importing this module -- which the tests do -- never
-        requires an API key, and so a missing key surfaces as a normalised
-        ``UpstreamStreamError`` rather than an import-time crash.
+        Deferred so importing this module never needs an API key, and so a
+        missing key surfaces as a normalised ``UpstreamStreamError`` rather than
+        an import-time crash.
+
+        Raises:
+            UpstreamStreamError: The SDK is absent, or no API key is set.
         """
         if self._client is None:
+            if self._client_factory is not None:
+                self._client = self._client_factory()
+                return self._client
             try:
                 from anthropic import AsyncAnthropic
-            except ImportError as exc:  # pragma: no cover
+            except ImportError as exc:
                 raise UpstreamStreamError("anthropic SDK is not installed") from exc
             if not os.environ.get("ANTHROPIC_API_KEY"):
                 raise UpstreamStreamError("ANTHROPIC_API_KEY is not set")
             self._client = AsyncAnthropic()
         return self._client
 
-    async def stream(self, prompt: str) -> AsyncIterator[str]:  # pragma: no cover - needs a key
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
         """Stream text deltas from the Anthropic Messages API.
 
         Yields:
-            Successive text deltas.
+            Successive text deltas, exactly as the SDK produces them, so the
+            redaction layer sees real token boundaries rather than boundaries
+            chosen by a fixture.
 
         Raises:
-            UpstreamStreamError: Any provider failure, with only the exception
-                *type* retained, so no provider-specific message escapes.
+            UpstreamStreamError: Any provider failure. Only the exception
+                *type* is retained, so no provider-specific message, body or
+                hostname can reach the client.
         """
         client = self._get_client()
         try:
@@ -161,14 +193,37 @@ class AnthropicProvider:
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
+        except UpstreamStreamError:
+            raise
         except Exception as exc:
             # Never let a provider-specific exception shape reach the client.
             raise UpstreamStreamError(f"anthropic stream failed: {type(exc).__name__}") from exc
 
 
 def provider_from_env():
-    """Build the provider named by ``LLM_PROVIDER`` (default ``mock``)."""
-    name = os.environ.get("LLM_PROVIDER", "mock").lower()
+    """Build the provider named by ``LLM_PROVIDER``.
+
+    When ``LLM_PROVIDER`` is unset the choice follows the environment rather
+    than always falling back to the fixture: if ``ANTHROPIC_API_KEY`` is
+    present the real provider is used, otherwise the mock. Defaulting to the
+    mock even when a key was available meant the documented run command never
+    exercised a real provider response, which is exactly the gap this closes.
+
+    Raises:
+        ValueError: ``LLM_PROVIDER`` names an unknown provider.
+    """
+    configured = os.environ.get("LLM_PROVIDER")
+    if configured:
+        name = configured.lower()
+    elif os.environ.get("ANTHROPIC_API_KEY"):
+        name = "anthropic"
+        logger.info("ANTHROPIC_API_KEY detected; using the real Anthropic provider")
+    else:
+        name = "mock"
+        logger.warning(
+            "no ANTHROPIC_API_KEY and no LLM_PROVIDER set - serving the scripted "
+            "mock provider. Redaction is real, but the upstream is a fixture."
+        )
     if name == "anthropic":
         return AnthropicProvider()
     if name == "mock":

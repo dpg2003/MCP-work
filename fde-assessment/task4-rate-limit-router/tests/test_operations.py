@@ -54,7 +54,13 @@ async def test_readiness_reports_the_database_check(ops_client):
     """Readiness names the dependency it checked, so an operator can tell what passed."""
     response = await ops_client.get("/readyz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "checks": {"rate_limit_db": "ok"}}
+    body = response.json()
+    assert body["status"] == "ready"
+    # Readiness now covers provider health too, so it reports both checks and
+    # the per-provider breaker state behind them.
+    assert body["checks"] == {"rate_limit_db": "ok", "providers": "ok"}
+    assert {p["provider"] for p in body["providers"]} == {"primary", "secondary"}
+    assert all(p["state"] == "closed" for p in body["providers"])
 
 
 async def test_readiness_fails_when_the_database_is_unusable(ops_client, gateway_app):

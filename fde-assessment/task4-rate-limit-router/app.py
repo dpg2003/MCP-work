@@ -41,18 +41,17 @@ from errors import (
 )
 from admission import AdmissionController
 from providers import HttpModelProvider
+from tenants import Tenant, TenantRegistry
 from rate_limiter import DEFAULT_LIMIT_TOKENS, DEFAULT_WINDOW_SECONDS, RateLimiter
 from router import DEFAULT_TIMEOUT_MS, ModelRouter
 from tokens_estimate import estimate_tokens
 
 logger = logging.getLogger("fde.gateway")
 
-# Demo key -> tenant mapping. A real deployment swaps this for a lookup; the
-# gateway only ever needs a tenant id out of it.
-DEFAULT_API_KEYS = {
-    "key-acme": "tenant-acme",
-    "key-globex": "tenant-globex",
-}
+# Tenant identity and quotas come from TenantRegistry (see tenants.py), which
+# stores only hashed keys and resolves them in constant time. Configure it with
+# TENANTS_FILE; with none set, a clearly-labelled demo registry is used and the
+# service logs a warning.
 
 
 class CompleteRequest(BaseModel):
@@ -70,6 +69,7 @@ def create_app(
     limiter: RateLimiter | None = None,
     router: ModelRouter | None = None,
     api_keys: dict[str, str] | None = None,
+    registry: TenantRegistry | None = None,
 ) -> FastAPI:
     """Build the gateway application.
 
@@ -78,7 +78,11 @@ def create_app(
             database and a controllable clock; defaults to one configured
             from the environment.
         router: Model router. Injectable so tests can use stub providers.
-        api_keys: Key-to-tenant mapping; defaults to the demo mapping.
+        api_keys: Legacy plaintext key-to-tenant mapping. Accepted so existing
+            callers and tests keep working; it is converted into a registry
+            whose tenants all get the "pro" quota.
+        registry: Tenant registry. Takes precedence over ``api_keys``;
+            defaults to one built from the environment.
     """
 
     @asynccontextmanager
@@ -93,7 +97,16 @@ def create_app(
 
     app = FastAPI(title="LLM gateway: rate limiting and model fallback", lifespan=lifespan)
 
-    app.state.api_keys = api_keys if api_keys is not None else dict(DEFAULT_API_KEYS)
+    if registry is not None:
+        app.state.registry = registry
+    elif api_keys is not None:
+        # Adapt the legacy {key: tenant} shape onto the registry.
+        app.state.registry = TenantRegistry.from_dict(
+            {"tenants": [{"tenant_id": tenant, "tier": "pro", "api_keys": [key]}
+                         for key, tenant in api_keys.items()]}
+        )
+    else:
+        app.state.registry = TenantRegistry.from_env()
     app.state.owns_client = False
 
     if limiter is None:
@@ -186,7 +199,50 @@ def create_app(
                 {"status": "not_ready", "checks": {"rate_limit_db": "error"}},
                 status_code=503,
             )
-        return {"status": "ready", "checks": {"rate_limit_db": "ok"}}
+        router_health = app.state.router.health()
+        if not router_health["available"]:
+            # Every provider's breaker is open: the gateway is up but cannot
+            # serve, so it should leave rotation rather than return errors.
+            return JSONResponse(
+                {"status": "not_ready",
+                 "checks": {"rate_limit_db": "ok", "providers": "all_circuits_open"},
+                 "providers": router_health["providers"]},
+                status_code=503,
+            )
+        return {
+            "status": "ready",
+            "checks": {"rate_limit_db": "ok", "providers": "ok"},
+            "providers": router_health["providers"],
+        }
+
+    @app.get("/v1/providers")
+    async def providers_health():
+        """Per-provider circuit-breaker state, for dashboards and on-call.
+
+        Exposes which providers are currently being skipped and how long until
+        the next probe, so an outage is visible without reading logs.
+        """
+        return app.state.router.health()
+
+    @app.get("/v1/quota")
+    async def quota(x_api_key: str | None = Header(default=None)):
+        """The calling tenant's own quota and current window usage."""
+        resolved = app.state.registry.resolve(x_api_key)
+        if resolved is None:
+            error = GatewayError(UNAUTHENTICATED)
+            return JSONResponse(error.to_payload(), status_code=error.http_status)
+        used = await app.state.admission.usage(resolved.tenant_id)
+        return {
+            "tenant": resolved.tenant_id,
+            "tier": resolved.tier,
+            "window_seconds": app.state.admission.window_seconds,
+            "limits": {
+                "tokens_per_minute": resolved.quota.tokens_per_minute,
+                "requests_per_minute": resolved.quota.requests_per_minute,
+                "max_concurrent": resolved.quota.max_concurrent,
+            },
+            "used_tokens": used,
+        }
 
     @app.post("/v1/complete")
     async def complete(body: CompleteRequest, x_api_key: str | None = Header(default=None)):
@@ -197,20 +253,27 @@ def create_app(
         """
         request_id = new_request_id()
 
-        tenant = app.state.api_keys.get(x_api_key or "")
-        if tenant is None:
+        resolved: Tenant | None = app.state.registry.resolve(x_api_key)
+        if resolved is None:
+            # The key itself is never logged -- only that resolution failed.
+            logger.warning("request_id=%s unresolved api key", request_id)
             raise GatewayError(UNAUTHENTICATED, request_id=request_id)
+        tenant = resolved.tenant_id
 
         admission: AdmissionController = app.state.admission
         estimated = estimate_tokens(body.prompt, body.max_tokens)
-        decision = await admission.try_consume(tenant, estimated)
+        decision = await admission.try_consume(tenant, estimated, resolved.quota)
         if not decision.allowed:
             raise GatewayError(
                 RATE_LIMIT_EXCEEDED,
                 details={
+                    "limit": decision.reason,
+                    "tier": resolved.tier,
                     "limit_tokens": decision.limit_tokens,
+                    "limit_requests": decision.limit_requests,
                     "window_seconds": admission.window_seconds,
                     "used_tokens": decision.used_tokens,
+                    "used_requests": decision.used_requests,
                     "requested_tokens": decision.requested_tokens,
                     "retry_after_seconds": decision.retry_after_seconds,
                 },
@@ -243,11 +306,13 @@ def create_app(
             "text": routed.completion.text,
             "provider": routed.provider_used,
             "failed_over": routed.failed_over,
+            "tenant": {"id": tenant, "tier": resolved.tier},
             "usage": {
                 "estimated_tokens": estimated,
                 "actual_tokens": routed.completion.tokens_used,
                 "tenant_window_tokens": window_tokens,
-                "limit_tokens": admission.limit_tokens,
+                "limit_tokens": decision.limit_tokens,
+                "limit_requests": decision.limit_requests,
             },
         }
         return JSONResponse(payload, headers={"X-Request-Id": request_id})
