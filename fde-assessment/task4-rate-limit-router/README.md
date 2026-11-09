@@ -10,14 +10,25 @@ a secondary, and one standardized error shape for every failure.
 | --- | --- |
 | `app.py` | The HTTP gateway wiring limiter and router together. Entry point. |
 | `rate_limiter.py` | Sliding window log in SQLite, transactional admission, reconciliation |
-| `router.py` | Primary/secondary failover policy |
+| `admission.py` | Group-commit front-end keeping SQLite off the event loop |
+| `concurrency.py` | Per-tenant in-flight ceiling (`max_concurrent`) |
+| `tenants.py` | API key to tenant/tier/quota resolution, hashed and constant-time |
+| `router.py` | N-provider failover policy and retry rules |
+| `circuit_breaker.py` | Stops paying the outage latency tax on a known-dead provider |
 | `providers.py` | Provider interface; normalises every upstream failure at the boundary |
 | `errors.py` | The single client-facing error shape |
-| `tokens_estimate.py` | Pre-flight token estimation |
+| `tokens_estimate.py` | Pre-flight token estimation, pluggable and script-aware |
 | `fake_upstream.py` | Fake primary/secondary endpoints with latency and failure injection |
 | `tests/test_rate_limiter.py` | Budgets, boundaries, eviction, persistence, races |
+| `tests/test_admission.py` | Group commit matches a serial oracle under concurrency |
+| `tests/test_concurrency.py` | The in-flight ceiling, isolation, and bookkeeping |
+| `tests/test_concurrency_e2e.py` | The gateway applies the ceiling and never leaks a slot |
+| `tests/test_tenants.py` | Key resolution, tiers, overrides, and that keys never leak |
 | `tests/test_router.py` | Failover triggers, timeout precision, flapping, sanitisation |
-| `tests/test_gateway_e2e.py` | The three concerns together, over HTTP |
+| `tests/test_circuit_breaker.py` | State transitions and traffic-driven recovery |
+| `tests/test_tokens_estimate.py` | Estimator contract and script-aware charging |
+| `tests/test_operations.py` | Health, readiness, and the operational endpoints |
+| `tests/test_gateway_e2e.py` | The concerns together, over HTTP |
 
 See the [root README](../../README.md) for the per-function reference.
 
@@ -70,7 +81,7 @@ curl -sX POST localhost:9100/_control/secondary -d '{"mode":"500"}' -H 'content-
 Over the budget:
 
 ```json
-{"error":{"type":"rate_limit_exceeded","message":"Token rate limit exceeded",
+{"error":{"type":"rate_limit_exceeded","message":"Rate limit exceeded",
           "request_id":"req_db66...","details":{"limit_tokens":150,"window_seconds":60.0,
           "used_tokens":63,"requested_tokens":102,"retry_after_seconds":59.93}}}
 ```
@@ -206,12 +217,45 @@ JSON document — see [`examples/tenants.example.json`](../../examples/tenants.e
 With nothing configured, a clearly-labelled demo registry is used and the
 service logs a warning.
 
-**Two dimensions, not one.** Tokens per minute *and* requests per minute, both
+**Three dimensions, not one.** Tokens per minute *and* requests per minute, both
 over the same sliding window, answered by one query against the covering index
 so the second dimension costs no extra round trip. A tenant sending many tiny
 prompts exhausts a provider's connections long before it exhausts a token
 budget, so tokens alone were never sufficient. A refusal names which budget ran
-out (`"limit": "tokens"` or `"requests"`).
+out (`"limit": "tokens"`, `"requests"` or `"concurrency"`).
+
+The third dimension is `max_concurrent`, in [`concurrency.py`](concurrency.py),
+and it is worth saying plainly that for a while this one was a lie: the field
+was defined in `Quota`, documented, and reported over `/v1/quota`, while nothing
+anywhere enforced it. An API that advertises a limit it does not apply is worse
+than one that never offered it.
+
+A window bounds *total work over time*; concurrency bounds *simultaneous work
+right now*, and nothing else in the stack covers that. A tenant that opens 500
+sockets at once is comfortably inside a 50,000-token minute for a while, yet it
+has already taken every upstream connection in the pool and every other tenant
+is queued behind it.
+
+Two decisions inside it are deliberate:
+
+- **Reject, do not queue.** The obvious implementation is a semaphore per
+  tenant that callers await. That converts a concurrency limit into unbounded
+  latency — a waiting caller still holds a socket and a handler task, so under a
+  sustained burst the queue grows without bound and everything times out. The
+  gateway degrades instead of shedding. Returning 429 immediately keeps queue
+  depth bounded by the limit and lets clients back off. The advertised
+  `retry_after_seconds` is accordingly short: unlike a window rejection, a
+  concurrency rejection clears as soon as any one in-flight request finishes.
+- **No lock.** `try_acquire` reads the counter and writes it back with no
+  `await` in between, which on a single-threaded event loop cannot be
+  interleaved. Adding an `asyncio.Lock` would *introduce* a suspension point and
+  make the operation genuinely racy in the window it was meant to protect.
+
+The slot is held for the whole request and released in a `finally`, including on
+the window rejection that returns before routing ever starts. A leaked slot is
+worse than no limit, because the tenant's depth would ratchet up until every
+later request was shed permanently — so each exit path from the handler has its
+own test in `tests/test_concurrency_e2e.py`.
 
 **Keys are not recoverable.** Only a SHA-256 hash is stored, comparison is
 constant-time across every entry, and keys are never logged — only the tenant
@@ -241,7 +285,8 @@ and is reconciled against real usage within milliseconds.
 - **`/v1/providers`** — per-provider breaker state: which providers are being
   skipped and how long until the next probe, so an outage is visible without
   reading logs.
-- **`/v1/quota`** — the calling tenant's own tier, limits and window usage.
+- **`/v1/quota`** — the calling tenant's own tier, limits, window usage and
+  current in-flight depth.
 - **Bounded provider pool** (100 connections, 20 keep-alive).
 - **Graceful shutdown** drains the group-commit workers on lifespan exit, with a
   test asserting no accepted admission is lost.
