@@ -8,7 +8,7 @@ goes through ``GatewayError`` and comes out as:
     {
       "error": {
         "type":       "rate_limit_exceeded",     # stable machine-readable enum
-        "message":    "Token rate limit exceeded",   # fixed, safe prose
+        "message":    "Rate limit exceeded",         # fixed, safe prose
         "request_id": "req_9f2c...",             # correlates with the logs
         "details":    {"limit_tokens": 50000}    # only gateway-owned facts
       }
@@ -41,7 +41,7 @@ _HTTP_STATUS = {
 _MESSAGES = {
     INVALID_REQUEST: "Invalid request",
     UNAUTHENTICATED: "Missing or unknown API key",
-    RATE_LIMIT_EXCEEDED: "Token rate limit exceeded",
+    RATE_LIMIT_EXCEEDED: "Rate limit exceeded",
     UPSTREAM_UNAVAILABLE: "No model provider was able to serve this request",
     INTERNAL_ERROR: "Internal gateway error",
 }
