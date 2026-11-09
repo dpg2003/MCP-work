@@ -40,6 +40,10 @@ from errors import (
     new_request_id,
 )
 from admission import AdmissionController
+from concurrency import (
+    CONCURRENCY_RETRY_AFTER_SECONDS,
+    ConcurrencyLimiter,
+)
 from providers import HttpModelProvider
 from tenants import Tenant, TenantRegistry
 from rate_limiter import DEFAULT_LIMIT_TOKENS, DEFAULT_WINDOW_SECONDS, RateLimiter
@@ -120,6 +124,7 @@ def create_app(
     # event loop. `limiter` stays reachable for tests and for shutdown.
     app.state.limiter = limiter
     app.state.admission = AdmissionController(limiter)
+    app.state.concurrency = ConcurrencyLimiter()
 
     if router is None:
         # Bound the pool so a burst cannot exhaust file descriptors, and so
@@ -242,6 +247,7 @@ def create_app(
                 "max_concurrent": resolved.quota.max_concurrent,
             },
             "used_tokens": used,
+            "in_flight": app.state.concurrency.in_flight(resolved.tenant_id),
         }
 
     @app.post("/v1/complete")
@@ -260,62 +266,87 @@ def create_app(
             raise GatewayError(UNAUTHENTICATED, request_id=request_id)
         tenant = resolved.tenant_id
 
-        admission: AdmissionController = app.state.admission
-        estimated = estimate_tokens(body.prompt, body.max_tokens)
-        decision = await admission.try_consume(tenant, estimated, resolved.quota)
-        if not decision.allowed:
+        # Concurrency is checked before the window: it is an in-memory
+        # comparison rather than a database round-trip, and a tenant that is
+        # already saturated should not spend limiter budget on a request that
+        # is about to be shed anyway.
+        quota = resolved.quota
+        slot = app.state.concurrency.try_acquire(tenant, quota.max_concurrent)
+        if slot is None:
             raise GatewayError(
                 RATE_LIMIT_EXCEEDED,
                 details={
-                    "limit": decision.reason,
+                    "limit": "concurrency",
                     "tier": resolved.tier,
-                    "limit_tokens": decision.limit_tokens,
-                    "limit_requests": decision.limit_requests,
-                    "window_seconds": admission.window_seconds,
-                    "used_tokens": decision.used_tokens,
-                    "used_requests": decision.used_requests,
-                    "requested_tokens": decision.requested_tokens,
-                    "retry_after_seconds": decision.retry_after_seconds,
+                    "limit_concurrent": quota.max_concurrent,
+                    "in_flight": app.state.concurrency.in_flight(tenant),
+                    "retry_after_seconds": CONCURRENCY_RETRY_AFTER_SECONDS,
                 },
                 request_id=request_id,
             )
 
+        # The slot is held for the whole request, reservation and routing
+        # included, and given back on every exit path -- including the
+        # rate-limit rejection below, which returns before routing starts.
         try:
-            routed = await app.state.router.complete(body.prompt, body.max_tokens, request_id)
-        except GatewayError:
-            # The request never produced tokens; give the budget back rather
-            # than charging a tenant for an outage that was not their fault.
-            await admission.release(decision.reservation_id)
-            raise
-        except Exception as exc:
-            # A bug, not a provider failure. Caught here rather than left to the
-            # framework's handler so the reservation is still released, and so
-            # the client gets the gateway's own error shape either way.
-            await admission.release(decision.reservation_id)
-            logger.exception("request_id=%s unexpected routing failure", request_id)
-            raise GatewayError(
-                INTERNAL_ERROR, request_id=request_id, internal_detail=f"{type(exc).__name__}"
-            ) from exc
+            admission: AdmissionController = app.state.admission
+            estimated = estimate_tokens(body.prompt, body.max_tokens)
+            decision = await admission.try_consume(tenant, estimated, quota)
+            if not decision.allowed:
+                raise GatewayError(
+                    RATE_LIMIT_EXCEEDED,
+                    details={
+                        "limit": decision.reason,
+                        "tier": resolved.tier,
+                        "limit_tokens": decision.limit_tokens,
+                        "limit_requests": decision.limit_requests,
+                        "window_seconds": admission.window_seconds,
+                        "used_tokens": decision.used_tokens,
+                        "used_requests": decision.used_requests,
+                        "requested_tokens": decision.requested_tokens,
+                        "retry_after_seconds": decision.retry_after_seconds,
+                    },
+                    request_id=request_id,
+                )
 
-        window_tokens = await admission.reconcile(
-            decision.reservation_id, routed.completion.tokens_used, tenant
-        )
+            try:
+                routed = await app.state.router.complete(body.prompt, body.max_tokens, request_id)
+            except GatewayError:
+                # The request never produced tokens; give the budget back rather
+                # than charging a tenant for an outage that was not their fault.
+                await admission.release(decision.reservation_id)
+                raise
+            except Exception as exc:
+                # A bug, not a provider failure. Caught here rather than left to the
+                # framework's handler so the reservation is still released, and so
+                # the client gets the gateway's own error shape either way.
+                await admission.release(decision.reservation_id)
+                logger.exception("request_id=%s unexpected routing failure", request_id)
+                raise GatewayError(
+                    INTERNAL_ERROR, request_id=request_id, internal_detail=f"{type(exc).__name__}"
+                ) from exc
 
-        payload: dict[str, Any] = {
-            "request_id": request_id,
-            "text": routed.completion.text,
-            "provider": routed.provider_used,
-            "failed_over": routed.failed_over,
-            "tenant": {"id": tenant, "tier": resolved.tier},
-            "usage": {
-                "estimated_tokens": estimated,
-                "actual_tokens": routed.completion.tokens_used,
-                "tenant_window_tokens": window_tokens,
-                "limit_tokens": decision.limit_tokens,
-                "limit_requests": decision.limit_requests,
-            },
-        }
-        return JSONResponse(payload, headers={"X-Request-Id": request_id})
+            window_tokens = await admission.reconcile(
+                decision.reservation_id, routed.completion.tokens_used, tenant
+            )
+
+            payload: dict[str, Any] = {
+                "request_id": request_id,
+                "text": routed.completion.text,
+                "provider": routed.provider_used,
+                "failed_over": routed.failed_over,
+                "tenant": {"id": tenant, "tier": resolved.tier},
+                "usage": {
+                    "estimated_tokens": estimated,
+                    "actual_tokens": routed.completion.tokens_used,
+                    "tenant_window_tokens": window_tokens,
+                    "limit_tokens": decision.limit_tokens,
+                    "limit_requests": decision.limit_requests,
+                },
+            }
+            return JSONResponse(payload, headers={"X-Request-Id": request_id})
+        finally:
+            app.state.concurrency.release(slot)
 
     return app
 
