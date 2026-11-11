@@ -35,7 +35,7 @@ def reference_matches(text: str) -> list[tuple[int, int, str]]:
         if match.groupdict().get("card") is None or _is_card(group):
             out.append((start, match.end(), group))
             position = match.end()
-        elif re.fullmatch(r"\d{4}([ -])\d{4}\1\d{4}\1\d{4}\1\d{1,3}", group) and _is_card(group[:19]):
+        elif re.fullmatch(r"\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{1,3}", group) and _is_card(group[:19]):
             out.append((start, start + 19, group[:19]))
             position = start + 19
         else:

@@ -272,6 +272,32 @@ def test_long_card_in_groups_of_four_is_redacted_whole(card):
     assert stream_through(list(text)) == f"card {REPLACEMENT} end"
 
 
+MIXED_SEPARATOR_CARDS = [
+    ("card 4111 1111-1111 1111 end", f"card {REPLACEMENT} end"),
+    ("card 4111-1111 1111-1111 12/28 end", f"card {REPLACEMENT} 12/28 end"),
+    ("card 3782 822463-10005 end", f"card {REPLACEMENT} end"),          # Amex 4-6-5
+    ("card 6205-5000 0000-0000 004 end", f"card {REPLACEMENT} end"),    # 19 digits
+]
+
+
+@pytest.mark.parametrize("text, expected", MIXED_SEPARATOR_CARDS)
+def test_card_with_mixed_separators_is_redacted(text, expected):
+    """Spaces and hyphens may be mixed between groups; only the group sizes decide the layout."""
+    assert redact_complete(text) == expected
+    chunkings = [[text[:cut], text[cut:]] for cut in range(1, len(text))]
+    chunkings.append(list(text))
+    chunkings.extend(split_every(text, width) for width in range(1, 9))
+    for chunks in chunkings:
+        assert stream_through(chunks) == expected, chunks
+
+
+def test_eight_eight_grouping_is_not_a_card_layout():
+    """8-8 is not a PAN layout and is left alone by design: matching it would also redact pairs of YYYYMMDD dates."""
+    text = "dates 20261111 20261231 and 41111111 11111111"
+    assert redact_complete(text) == text
+    assert stream_through(list(text)) == text
+
+
 # --------------------------------------------------------------------------
 # Unicode
 # --------------------------------------------------------------------------

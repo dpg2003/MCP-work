@@ -116,7 +116,8 @@ reviews the transcript — but redacting the answer the user asked for. So:
   `123456789` is left alone.
 - **Cards** are 13–19 digits, unseparated or in a standard grouping — 4-4-4-4
   with an optional 1–3 digit fifth group, 4-4-4-x, or Amex/Diners 4-6-x — with
-  one space or hyphen used throughout, then a **Luhn** checksum. That is what
+  a single space or hyphen between groups (mixing them is fine; 8-8 is not a
+  card layout and is not matched), then a **Luhn** checksum. That is what
   stops a 16-digit order number being redacted. Fixed groups stop a card
   absorbing a neighbouring expiry, CVV or quantity (`4111 1111 1111 1111 12/28`),
   and a candidate that fails Luhn never hides a card it overlaps: the scanner
