@@ -122,7 +122,7 @@ reviews the transcript — but redacting the answer the user asked for. So:
   absorbing a neighbouring expiry, CVV or quantity (`4111 1111 1111 1111 12/28`),
   and a candidate that fails Luhn never hides a card it overlaps: the scanner
   tries its 16-digit reading, then resumes one character in rather than after
-  it, so `Item 2 4111 1111 1111 1111` is still caught. Dots are not accepted as
+  it, so `1234 4111 1111 1111 1111` is still caught. Dots are not accepted as
   separators, so `192.168.1.1` and `v1.2.3` cannot match.
 - **Emails** require a dot-separated TLD of 2–63 letters, so `user@localhost`
   and `@mentions` do not match.

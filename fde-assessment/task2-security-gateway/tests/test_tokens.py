@@ -132,9 +132,9 @@ def _run_cli(secret_value: str | None, *args: str) -> subprocess.CompletedProces
 
 @MISSING_OR_SHORT_SECRETS
 def test_cli_refuses_to_mint_without_a_valid_secret(secret_value):
-    """The mint-token CLI exits non-zero, explains why on stderr, and prints no token."""
+    """The mint-token CLI exits with status 1, explains why on stderr, and prints no token."""
     result = _run_cli(secret_value, "admin")
-    assert result.returncode != 0
+    assert result.returncode == 1
     assert result.stdout == ""
     assert "GATEWAY_TOKEN_SECRET" in result.stderr
     assert str(tokens.MIN_SECRET_BYTES) in result.stderr

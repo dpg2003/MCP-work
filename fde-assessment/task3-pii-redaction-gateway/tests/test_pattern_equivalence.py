@@ -166,8 +166,9 @@ def test_adversarial_at_sign_placements_agree():
 @pytest.mark.parametrize(
     "text, card",
     [
-        ("Item 2 4111 1111 1111 1111 paid", "4111 1111 1111 1111"),      # rescan past a leading group
+        ("Item 2 4111 1111 1111 1111 paid", "4111 1111 1111 1111"),      # lone digit cannot start a candidate
         ("1234 4111 1111 1111 1111", "4111 1111 1111 1111"),             # rescan inside a rejected 4-4-4-4
+        ("1234 567890 4111 1111 1111 1111", "4111 1111 1111 1111"),      # rescan inside a rejected 4-6-x
         ("Card 4111 1111 1111 1111 123 ok", "4111 1111 1111 1111"),      # 16-digit fallback
         ("Card 6205 5000 0000 0000 004 ok", "6205 5000 0000 0000 004"),  # 19-digit reading kept
     ],

@@ -200,7 +200,7 @@ def find_matches(text: str) -> Iterable[re.Match[str]]:
     because a real card may overlap it. The 16-digit reading at the same start
     is tried first (a card followed by its CVV); failing that, scanning resumes
     one character after the candidate's *start*, so a card that begins inside
-    it (``"Item 2 4111 1111 1111 1111"``) is still found. ``finditer`` cannot do
+    it (``"1234 4111 1111 1111 1111"``) is still found. ``finditer`` cannot do
     this: it resumes at the end of the regex match, before Luhn has run.
 
     Results are identical to running the same scan with :data:`PATTERN`; see
