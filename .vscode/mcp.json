@@ -1,0 +1,15 @@
+{
+  // VS Code's native MCP client. Open the Command Palette and run
+  // "MCP: List Servers" to start it, or click Start above the server entry.
+  //
+  // The Task 1 server speaks MCP over stdio, so VS Code launches it directly.
+  // The interpreter path assumes ./setup.sh has been run.
+  "servers": {
+    "fde-customer-ops": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": ["${workspaceFolder}/fde-assessment/task1-mcp-server/server.py"],
+      "cwd": "${workspaceFolder}/fde-assessment/task1-mcp-server"
+    }
+  }
+}

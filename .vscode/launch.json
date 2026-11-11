@@ -1,0 +1,78 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Task 1: MCP server (stdio)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/fde-assessment/task1-mcp-server/server.py",
+      "cwd": "${workspaceFolder}/fde-assessment/task1-mcp-server",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Task 2: security gateway (:9000)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["gateway:app", "--port", "9000"],
+      "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
+      "env": {
+        "DOWNSTREAM_URL": "http://127.0.0.1:9001/mcp",
+        "GATEWAY_TOKEN_SECRET": "dev-secret-change-me"
+      },
+      "justMyCode": false
+    },
+    {
+      "name": "Task 2: mock downstream (:9001)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["downstream:app", "--port", "9001"],
+      "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
+      "justMyCode": false
+    },
+    {
+      "name": "Task 3: PII redaction gateway (:8000)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app:app", "--port", "8000"],
+      "cwd": "${workspaceFolder}/fde-assessment/task3-pii-redaction-gateway",
+      "justMyCode": false
+    },
+    {
+      "name": "Task 4: rate limit router (:8080)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app:app", "--port", "8080"],
+      "cwd": "${workspaceFolder}/fde-assessment/task4-rate-limit-router",
+      "env": {
+        "RATE_LIMIT_DB": "${workspaceFolder}/.dev-rate-limit.sqlite3",
+        "PRIMARY_URL": "http://127.0.0.1:9100/primary/v1/complete",
+        "SECONDARY_URL": "http://127.0.0.1:9100/secondary/v1/complete"
+      },
+      "justMyCode": false
+    },
+    {
+      "name": "Task 4: fake providers (:9100)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["fake_upstream:app", "--port", "9100"],
+      "cwd": "${workspaceFolder}/fde-assessment/task4-rate-limit-router",
+      "justMyCode": false
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Task 2: gateway + downstream",
+      "configurations": ["Task 2: mock downstream (:9001)", "Task 2: security gateway (:9000)"]
+    },
+    {
+      "name": "Task 4: router + providers",
+      "configurations": ["Task 4: fake providers (:9100)", "Task 4: rate limit router (:8080)"]
+    }
+  ]
+}
