@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 import tokens
-from conftest import TEST_SECRET, bearer, call, listing
+from conftest import OLD_PUBLIC_DEFAULT_SECRET, TEST_SECRET, bearer, call, listing
 
 UNAUTHORIZED_TOOL_CALL = -32001
 UNAUTHENTICATED = -32002
@@ -195,6 +195,15 @@ async def test_token_signed_with_the_wrong_secret_is_rejected(client, call_log):
     forged = tokens.issue("mallory@example.com", "admin", secret=b"the-wrong-secret")
     response = await post(client, call("admin_reset_key"), bearer(forged))
     assert response.status_code == 401
+    assert call_log.count == 0
+
+
+async def test_token_signed_with_the_old_public_default_secret_is_rejected(client, call_log):
+    """The former fallback secret is in the repo, so an admin token forged with it must get a 401."""
+    forged = tokens.issue("attacker", "admin", ttl_seconds=10**9, secret=OLD_PUBLIC_DEFAULT_SECRET)
+    response = await post(client, call("admin_reset_key"), bearer(forged))
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == UNAUTHENTICATED
     assert call_log.count == 0
 
 

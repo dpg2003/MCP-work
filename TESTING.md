@@ -134,7 +134,7 @@ With the run tasks started:
 ```bash
 # Task 2 - mint a token, then get blocked
 TOKEN=$(cd fde-assessment/task2-security-gateway && \
-        GATEWAY_TOKEN_SECRET=dev-secret-change-me .venv/bin/python tokens.py viewer)
+        GATEWAY_TOKEN_SECRET=dev-only-public-secret-never-use-in-production .venv/bin/python tokens.py viewer)
 curl -sX POST localhost:9000/mcp -H "Authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"admin_reset_key"}}'

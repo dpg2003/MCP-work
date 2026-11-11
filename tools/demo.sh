@@ -18,7 +18,7 @@ if [ ! -x "$python" ]; then
     exit 2
 fi
 
-export GATEWAY_TOKEN_SECRET="${GATEWAY_TOKEN_SECRET:-demo-secret}"
+export GATEWAY_TOKEN_SECRET="${GATEWAY_TOKEN_SECRET:-demo-only-public-secret-never-use-in-production}"  # dev-only, >= 32 bytes
 db="$(mktemp -u /tmp/demo-rate-limit-XXXXXX.sqlite3)"
 pids=()
 

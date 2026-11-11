@@ -10,7 +10,7 @@ import httpx
 from _harness import ASSESSMENT, PYTHON, Runner
 
 PROJECT = ASSESSMENT / "task2-security-gateway"
-SECRET = "assessment-matrix-secret"
+SECRET = "assessment-only-public-secret-never-use-in-production"  # dev-only, >= 32 bytes
 GATEWAY = "http://127.0.0.1:9500/mcp"
 DOWNSTREAM_STATS = "http://127.0.0.1:9501/_control/stats"
 

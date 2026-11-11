@@ -73,7 +73,7 @@
         "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
         "env": {
           "DOWNSTREAM_URL": "http://127.0.0.1:9001/mcp",
-          "GATEWAY_TOKEN_SECRET": "dev-secret-change-me"
+          "GATEWAY_TOKEN_SECRET": "dev-only-public-secret-never-use-in-production"
         }
       },
       "isBackground": true, "problemMatcher": [],
@@ -85,7 +85,7 @@
       "command": "${workspaceFolder}/.venv/bin/python tokens.py viewer",
       "options": {
         "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
-        "env": { "GATEWAY_TOKEN_SECRET": "dev-secret-change-me" }
+        "env": { "GATEWAY_TOKEN_SECRET": "dev-only-public-secret-never-use-in-production" }
       },
       "problemMatcher": []
     },
@@ -95,7 +95,7 @@
       "command": "${workspaceFolder}/.venv/bin/python tokens.py admin",
       "options": {
         "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
-        "env": { "GATEWAY_TOKEN_SECRET": "dev-secret-change-me" }
+        "env": { "GATEWAY_TOKEN_SECRET": "dev-only-public-secret-never-use-in-production" }
       },
       "problemMatcher": []
     },

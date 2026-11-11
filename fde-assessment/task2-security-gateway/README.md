@@ -24,23 +24,33 @@ See the [root README](../../README.md) for the per-function reference.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-export GATEWAY_TOKEN_SECRET=some-long-random-string
+# generate the signing secret ONCE and copy the output
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
 
-# terminal 1 — the mock downstream MCP server
+# terminal 1 — the mock downstream MCP server (needs no secret)
 uvicorn downstream:app --port 9001
 
 # terminal 2 — the gateway
+export GATEWAY_TOKEN_SECRET='<the value generated above>'
 DOWNSTREAM_URL=http://127.0.0.1:9001/mcp uvicorn gateway:app --port 9000
 ```
 
-Mint tokens with the built-in CLI:
+There is no default secret. The gateway refuses to start (uvicorn logs
+`SecretNotConfigured` and `Application startup failed. Exiting.`) unless
+`GATEWAY_TOKEN_SECRET` is set to at least 32 bytes, and `tokens.py` exits
+non-zero without printing a token. Every terminal that starts the gateway or
+mints a token must export the **same** value — an `export` in one shell does not
+reach another.
+
+Mint tokens with the built-in CLI, in a third terminal:
 
 ```bash
+export GATEWAY_TOKEN_SECRET='<the same value as terminal 2>'
 python tokens.py admin   root@example.com
 python tokens.py viewer  reader@example.com
 ```
 
-Then:
+Then, in that same terminal:
 
 ```bash
 TOKEN=$(python tokens.py viewer)
@@ -151,6 +161,10 @@ error — which is what an MCP client is actually equipped to parse.
 
 ## Production hardening
 
+- **No default signing secret.** `GATEWAY_TOKEN_SECRET` must be set to at least
+  32 bytes (UTF-8); unset, empty, or shorter values raise `SecretNotConfigured`
+  and the gateway fails at startup rather than signing with a value anyone
+  could read in the repo. The error names the variable, never its value.
 - **Request body cap** (`GATEWAY_MAX_BODY_BYTES`, default 1 MiB). `Content-Length`
   is rejected up front so an oversized request costs nothing, *and* the streamed
   read is capped independently — a chunked request has no length header and a

@@ -12,7 +12,8 @@ import httpx
 import pytest
 
 import gateway
-from conftest import DOWNSTREAM_URL, bearer, call, listing
+import tokens
+from conftest import DOWNSTREAM_URL, MISSING_OR_SHORT_SECRETS, bearer, call, listing, set_secret
 
 PAYLOAD_TOO_LARGE = -32600
 
@@ -162,3 +163,49 @@ async def test_normal_traffic_is_unaffected_by_the_limits(client, admin_token, c
                                  headers=bearer(admin_token))
     assert response.status_code == 200
     assert call_log.tool_calls == ["get_weather"]
+
+
+# --------------------------------------------------------------------------
+# Startup refuses to proceed without a signing secret
+# --------------------------------------------------------------------------
+async def _run_lifespan(app, sent: list[dict]) -> None:
+    """Drive the ASGI lifespan protocol as uvicorn does, recording every message the app sends.
+
+    ``sent`` is filled in place so the caller can still inspect it when startup
+    raises (Starlette reports ``lifespan.startup.failed`` and then re-raises).
+    """
+    inbox = [{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}]
+
+    async def receive() -> dict:
+        """Hand the app the next lifespan event."""
+        return inbox.pop(0)
+
+    async def send(message: dict) -> None:
+        """Record what the app reports back to the server."""
+        sent.append(message)
+
+    await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+
+
+@MISSING_OR_SHORT_SECRETS
+async def test_gateway_refuses_to_start_without_a_valid_secret(monkeypatch, secret_value):
+    """Startup fails, which makes uvicorn exit, so the gateway never serves on a missing or short key."""
+    set_secret(monkeypatch, secret_value)
+    app = gateway.create_app(downstream_url=DOWNSTREAM_URL)
+    sent: list[dict] = []
+    with pytest.raises(tokens.SecretNotConfigured):
+        await _run_lifespan(app, sent)
+    assert [message["type"] for message in sent] == ["lifespan.startup.failed"]
+    assert "GATEWAY_TOKEN_SECRET" in sent[0]["message"]
+    if secret_value:
+        assert secret_value not in sent[0]["message"]
+
+
+async def test_gateway_starts_with_a_valid_secret():
+    """The positive control: the same lifespan drive with the pinned 32+ byte secret starts and stops cleanly."""
+    app = gateway.create_app(downstream_url=DOWNSTREAM_URL)
+    sent: list[dict] = []
+    await _run_lifespan(app, sent)
+    assert [message["type"] for message in sent] == [
+        "lifespan.startup.complete", "lifespan.shutdown.complete",
+    ]

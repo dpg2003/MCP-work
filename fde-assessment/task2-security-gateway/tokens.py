@@ -40,11 +40,20 @@ VIEWER_ROLE = "viewer"
 KNOWN_ROLES = frozenset({ADMIN_ROLE, VIEWER_ROLE})
 
 DEFAULT_TTL_SECONDS = 3600
-_DEV_SECRET = "dev-only-insecure-secret-change-me"
+
+# There is deliberately no default secret: a fallback value committed to the
+# repo is public, so anyone could forge an admin token against a gateway that
+# silently used it. 32 bytes matches the HMAC-SHA256 output size.
+SECRET_ENV_VAR = "GATEWAY_TOKEN_SECRET"
+MIN_SECRET_BYTES = 32
 
 
 class InvalidToken(Exception):
     """Raised for any token that cannot be trusted, for any reason."""
+
+
+class SecretNotConfigured(RuntimeError):
+    """``GATEWAY_TOKEN_SECRET`` is unset, empty, or shorter than ``MIN_SECRET_BYTES``."""
 
 
 @dataclass(frozen=True)
@@ -71,8 +80,21 @@ class Principal:
 
 
 def get_secret() -> bytes:
-    """Signing secret, from ``GATEWAY_TOKEN_SECRET`` or an obvious dev default."""
-    return os.environ.get("GATEWAY_TOKEN_SECRET", _DEV_SECRET).encode("utf-8")
+    """Signing secret, from ``GATEWAY_TOKEN_SECRET``. There is no default.
+
+    Raises:
+        SecretNotConfigured: The variable is unset, empty, or shorter than
+            ``MIN_SECRET_BYTES`` once UTF-8 encoded. The message never
+            includes the value.
+    """
+    secret = os.environ.get(SECRET_ENV_VAR, "").encode("utf-8")
+    if len(secret) < MIN_SECRET_BYTES:
+        raise SecretNotConfigured(
+            f"{SECRET_ENV_VAR} must be set to a secret of at least {MIN_SECRET_BYTES} bytes "
+            "(UTF-8); refusing to sign or verify tokens without one. Generate one with: "
+            "python -c 'import secrets; print(secrets.token_urlsafe(32))'"
+        )
+    return secret
 
 
 def _b64encode(raw: bytes) -> str:
@@ -169,4 +191,8 @@ if __name__ == "__main__":  # pragma: no cover - developer convenience
 
     role = sys.argv[1] if len(sys.argv) > 1 else VIEWER_ROLE
     subject = sys.argv[2] if len(sys.argv) > 2 else f"{role}@example.com"
-    print(issue(subject, role))
+    try:
+        token = issue(subject, role)
+    except SecretNotConfigured as exc:
+        sys.exit(f"tokens.py: {exc}")  # message to stderr, exit status 1, no token
+    print(token)

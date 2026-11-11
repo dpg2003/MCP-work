@@ -23,12 +23,31 @@ import gateway  # noqa: E402
 import tokens  # noqa: E402
 
 DOWNSTREAM_URL = "http://downstream.internal/mcp"
-TEST_SECRET = b"unit-test-secret"
+TEST_SECRET = b"unit-test-secret-at-least-32-bytes-long"  # >= tokens.MIN_SECRET_BYTES
+
+# The default tokens.py used to fall back to. It is public, so a token signed
+# with it must never verify again.
+OLD_PUBLIC_DEFAULT_SECRET = b"dev-only-insecure-secret-change-me"
+
+# GATEWAY_TOKEN_SECRET values that must be refused: None means unset. The last
+# is 16 characters but 31 UTF-8 bytes, so the minimum is measured in bytes.
+MISSING_OR_SHORT_SECRETS = pytest.mark.parametrize(
+    "secret_value", [None, "", "q" * 31, "é" * 15 + "q"],
+    ids=["unset", "empty", "31-bytes", "31-bytes-multibyte"],
+)
+
+
+def set_secret(monkeypatch, value: str | None) -> None:
+    """Set ``GATEWAY_TOKEN_SECRET`` to ``value``, or unset it when ``value`` is None."""
+    if value is None:
+        monkeypatch.delenv("GATEWAY_TOKEN_SECRET", raising=False)
+    else:
+        monkeypatch.setenv("GATEWAY_TOKEN_SECRET", value)
 
 
 @pytest.fixture(autouse=True)
 def _pin_secret(monkeypatch):
-    """Pin the signing secret so tests never depend on the dev default."""
+    """Pin a valid signing secret; there is no default to fall back to."""
     monkeypatch.setenv("GATEWAY_TOKEN_SECRET", TEST_SECRET.decode())
 
 

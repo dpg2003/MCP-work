@@ -47,7 +47,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from tokens import ADMIN_ROLE, InvalidToken, Principal, parse_authorization_header
+from tokens import ADMIN_ROLE, InvalidToken, Principal, get_secret, parse_authorization_header
 
 logger = logging.getLogger("fde.gateway")
 
@@ -245,7 +245,17 @@ def create_app(
     """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        """Own an httpx client for the app's lifetime, unless one was injected."""
+        """Refuse to start without a signing secret, then own an httpx client
+        for the app's lifetime, unless one was injected.
+
+        The secret is checked here rather than in ``create_app`` because the
+        module-level ``app`` is built at import time; checking at startup makes
+        uvicorn exit instead of serving, without breaking a plain import.
+
+        Raises:
+            SecretNotConfigured: ``GATEWAY_TOKEN_SECRET`` is missing or too short.
+        """
+        get_secret()
         if app.state.client is None:
             app.state.client = httpx.AsyncClient(
                 timeout=app.state.timeout_seconds,

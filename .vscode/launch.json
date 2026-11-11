@@ -19,7 +19,7 @@
       "cwd": "${workspaceFolder}/fde-assessment/task2-security-gateway",
       "env": {
         "DOWNSTREAM_URL": "http://127.0.0.1:9001/mcp",
-        "GATEWAY_TOKEN_SECRET": "dev-secret-change-me"
+        "GATEWAY_TOKEN_SECRET": "dev-only-public-secret-never-use-in-production"
       },
       "justMyCode": false
     },
