@@ -41,6 +41,21 @@ def sort_key(number: str) -> tuple[int, int]:
     return int(major), int(minor)
 
 
+def count_problem(recorded: int, expected: int) -> str:
+    """Describe how a task's recorded case count differs from the document's.
+
+    Returns ``""`` when they match, otherwise e.g. ``"1 missing"`` or
+    ``"2 unexpected"``. A mismatch means the run is not the complete
+    assessment -- a lost ``runner.record`` call would otherwise look like a
+    clean pass -- so it is rendered in the output and fails the run.
+    """
+    if recorded < expected:
+        return f"{expected - recorded} missing"
+    if recorded > expected:
+        return f"{recorded - expected} unexpected"
+    return ""
+
+
 def main(argv: list[str]) -> int:
     """Run every task and write the filled-in matrix."""
     destination = Path(argv[1]) if len(argv) > 1 else REPO / "ASSESSMENT_RESULTS.md"
@@ -55,9 +70,18 @@ def main(argv: list[str]) -> int:
         finally:
             runner.stop()
         cases = sorted(runner.cases, key=lambda c: sort_key(c.number))
-        if len(cases) != expected:
-            print(f"  WARNING: {len(cases)} cases, document lists {expected}", file=sys.stderr)
+        problem = count_problem(len(cases), expected)
+        if problem:
+            print(f"  ERROR: {len(cases)} cases, document lists {expected} ({problem})",
+                  file=sys.stderr)
         sections.append((title, cases, expected))
+
+    missing = sum(max(expected - len(cases), 0) for _, cases, expected in sections)
+    unexpected = sum(max(len(cases) - expected, 0) for _, cases, expected in sections)
+    mismatched = [
+        f"{title.split(':')[0]} recorded {len(cases)} cases, the document lists {expected}"
+        for title, cases, expected in sections if len(cases) != expected
+    ]
 
     lines = [
         "# FDE Assessment — Measured Test Results",
@@ -77,6 +101,12 @@ def main(argv: list[str]) -> int:
         "threshold. Rows marked `n/a` are informational rather than pass/fail.",
         "",
     ]
+    if mismatched:
+        lines += [
+            "> **INCOMPLETE RUN -- case-count mismatch, this run did not pass:** "
+            + "; ".join(mismatched) + ".",
+            "",
+        ]
 
     totals = [0, 0]
     for title, cases, _ in sections:
@@ -105,21 +135,29 @@ def main(argv: list[str]) -> int:
         "| Task | Total Cases | Passed | Failed |",
         "|---|---|---|---|",
     ]
-    for title, cases, _ in sections:
+    for title, cases, expected in sections:
         label = title.split(":")[0]
+        problem = count_problem(len(cases), expected)
+        count = f"{len(cases)} ({problem})" if problem else str(len(cases))
         lines.append(
-            f"| {label} | {len(cases)} | {sum(1 for c in cases if c.passed)} "
+            f"| {label} | {count} | {sum(1 for c in cases if c.passed)} "
             f"| {sum(1 for c in cases if c.passed is False)} |"
         )
-    lines.append(
-        f"| **Total** | **{sum(len(c) for _, c, _ in sections)}** "
-        f"| **{totals[0]}** | **{totals[1]}** |"
-    )
+    gaps = []
+    if missing:
+        gaps.append(f"{missing} missing")
+    if unexpected:
+        gaps.append(f"{unexpected} unexpected")
+    count = f"**{sum(len(c) for _, c, _ in sections)}**"
+    if gaps:
+        count += f" ({', '.join(gaps)})"
+    lines.append(f"| **Total** | {count} | **{totals[0]}** | **{totals[1]}** |")
     lines.append("")
 
     destination.write_text("\n".join(lines), encoding="utf-8")
-    print(f"\nwrote {destination}  ({totals[0]} passed, {totals[1]} failed)", file=sys.stderr)
-    return 1 if totals[1] else 0
+    summary = ", ".join([f"{totals[0]} passed", f"{totals[1]} failed", *gaps])
+    print(f"\nwrote {destination}  ({summary})", file=sys.stderr)
+    return 1 if totals[1] or missing or unexpected else 0
 
 
 if __name__ == "__main__":
