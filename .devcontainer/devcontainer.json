@@ -1,0 +1,34 @@
+{
+  "name": "FDE Assessment - MCP & LLM Gateways",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
+
+  // Everything the projects need is installed on first open, so a fresh clone
+  // is ready to run without any local Python setup.
+  "postCreateCommand": "./setup.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+        "python.testing.pytestEnabled": true
+      }
+    }
+  },
+
+  // Ports the documented run commands use. Labelled so the VS Code Ports view
+  // says what each one is.
+  "forwardPorts": [9000, 9001, 8000, 8080, 9100],
+  "portsAttributes": {
+    "9000": { "label": "Task 2 - security gateway" },
+    "9001": { "label": "Task 2 - mock downstream MCP server" },
+    "8000": { "label": "Task 3 - PII redaction gateway" },
+    "8080": { "label": "Task 4 - rate limit router" },
+    "9100": { "label": "Task 4 - fake model providers" }
+  }
+}

@@ -1,0 +1,317 @@
+# Task 3 — LLM Gateway Streaming Guardrail (PII Redaction)
+
+A streaming LLM gateway that proxies a text-generation request and redacts
+emails, SSNs, and credit card numbers **in real time** — correctly even when a
+pattern is split across chunk boundaries, and without buffering the response.
+
+## Files
+
+| File | Purpose |
+| --- | --- |
+| `redactor.py` | The sliding-buffer state machine — the core of the task |
+| `app.py` | FastAPI `StreamingResponse` endpoint and mid-stream failure handling. Entry point. |
+| `providers.py` | Mock, SSE-mock and real Anthropic providers behind one async-iterator interface |
+| `tests/conftest.py` | PII samples, chunking helpers, and a live-server context manager |
+| `tests/test_redactor.py` | Split-point coverage, false positives, unicode, memory bounds, the differential oracle |
+| `tests/test_gateway_stream.py` | HTTP streaming, TTFT, upstream failures |
+| `tests/test_pattern_equivalence.py` | The narrowed match path against the full alternation |
+| `tests/test_partial_equivalence.py` | The possessive hold-back regex against its backtracking form |
+| `tests/test_performance_properties.py` | Linear scaling and bounded buffers, without absolute timings |
+| `tests/test_anthropic_contract.py` | The real `AnthropicProvider.stream` against a stub of the SDK surface |
+| `tests/test_observability.py` | Request ids on responses and on the failure log; the prompt-size cap |
+
+See the [root README](../../README.md) for the per-function reference.
+
+## Run it
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+uvicorn app:app --port 8000   # mock upstream unless ANTHROPIC_API_KEY is set
+```
+
+With `LLM_PROVIDER` unset, the provider follows the environment: a set
+`ANTHROPIC_API_KEY` selects the real Anthropic provider, otherwise the scripted
+mock is used and a warning is logged. Set `LLM_PROVIDER=mock` to force the mock.
+Already ran `../../setup.sh`? Use `source ../../.venv/bin/activate` instead of
+the first two lines.
+
+```bash
+curl -sN -X POST localhost:8000/v1/generate \
+     -H 'content-type: application/json' \
+     -d '{"prompt":"summarise the customer"}'
+```
+
+```
+Sure — here is the customer summary you asked for.
+
+The account owner is Jane Roe and her contact address is [REDACTED]. She last logged in on Tuesday.
+Her social security number on file is [REDACTED], and the card ending in the visible digits is [REDACTED].
+Her support ticket reference is 123456789 and the server she reported the issue from was 192.168.1.1 running v1.2.3 — neither of which is PII.
+```
+
+The mock upstream deliberately splits the email, the SSN, and the card across
+chunk boundaries (see `DEFAULT_SCRIPT` in `providers.py`), and deliberately
+includes near-miss text that must survive untouched.
+
+To use the real Anthropic API instead:
+
+```bash
+export LLM_PROVIDER=anthropic
+export ANTHROPIC_API_KEY=sk-ant-...
+export ANTHROPIC_MODEL=claude-sonnet-5   # optional
+uvicorn app:app --port 8000
+```
+
+## Run the tests
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
+319 tests, no network and no API key required.
+
+## How the sliding buffer works
+
+Per-chunk regex matching leaks: `"...john.doe@exam"` + `"ple.com"` matches
+nothing in either chunk. Buffering the whole response fixes that and destroys
+time-to-first-token. So the redactor holds back **only the suffix that could
+still grow into a match**.
+
+For each chunk:
+
+1. `buffer += chunk`.
+2. Compute `emit_limit`, the point up to which the text is *settled* — no future
+   input can change how it redacts. It is the earliest of:
+   - the start of the longest suffix that is a viable **prefix** of some pattern
+     (`PARTIAL` regex): a trailing `"john.doe@exam"` pins `emit_limit` to where
+     that fragment starts;
+   - the start of any match still *open* at the buffer end (so a 16-digit card
+     that a later chunk extends to 20 digits is never redacted prematurely);
+   - with `len(buffer) - max_hold` as a floor, capping how much can ever be
+     held.
+3. Redact every match ending at or before `emit_limit`. Matching runs against
+   the **whole** buffer, so `\b` and neighbouring context are evaluated
+   correctly, but only settled matches are substituted.
+4. Emit `buffer[:emit_limit]`; keep the rest.
+
+`close()` sets `emit_limit = len(buffer)`: the tail goes through the same
+redaction and is flushed. It is never dropped. But redaction only replaces
+*complete* matches, so a fragment that never became one is flushed as-is. That
+happens when the stream ends, or the upstream dies, partway through a token:
+`"Her card is 4111 1111 1111"` and `"SSN 123-45-67"` reach the client
+unchanged, followed by the error sentinel if the upstream failed.
+`tests/test_redactor.py` asserts this on purpose
+(`test_stream_ending_with_a_truncated_pattern_flushes_it_unmodified`). A
+fragment that does not complete a pattern is not PII by these patterns, but it
+can be the leading digits of a real card or SSN.
+
+### Guarantees
+
+- **Split width.** Any PII token up to `max_hold` characters (default **256**)
+  is redacted no matter how it is split — including one character per chunk.
+  Tests assert this at every split point of every secret, and character by
+  character. SSNs and cards are always within that (cards are at most 23
+  characters). Emails are not: the email pattern has no length cap, so an
+  address longer than `max_hold` has its leading characters emitted before it
+  completes. A 300-character local part streamed one character at a time
+  leaked its first 54 characters when measured.
+- **Memory.** `len(buffer) <= max_hold + len(largest chunk)`, independent of
+  stream length. Asserted two ways: a buffer high-water-mark invariant over a
+  1 MB stream (including an adversarial all-digit flood, which would grow an
+  unbounded "might still be a card" tail under a naive implementation), and a
+  `tracemalloc` measurement over a 3 MB stream.
+- **TTFT.** The hold-back is *adaptive*, not a fixed window. Ordinary prose ends
+  in characters that cannot begin any pattern, so `emit_limit == len(buffer)`
+  and the first chunk flushes in full. A test asserts the first byte reaches the
+  client after roughly one upstream chunk rather than after all twenty.
+
+## Avoiding false positives
+
+The failure mode that actually hurts a gateway is not a missed match — a human
+reviews the transcript — but redacting the answer the user asked for. So:
+
+- **SSN** requires the `3-2-4` grouping with a consistent explicit separator. A
+  bare 9-digit run is a product code far more often than an SSN, so
+  `123456789` is left alone.
+- **Cards** are 13–19 digits, unseparated or in a standard grouping — 4-4-4-4
+  with an optional 1–3 digit fifth group, 4-4-4-x, or Amex/Diners 4-6-x — with
+  a single space or hyphen between groups (mixing them is fine; 8-8 is not a
+  card layout and is not matched), then a **Luhn** checksum. That is what
+  stops a 16-digit order number being redacted. Fixed groups stop a card
+  absorbing a neighbouring expiry, CVV or quantity (`4111 1111 1111 1111 12/28`),
+  and a candidate that fails Luhn never hides a card it overlaps: the scanner
+  tries its 16-digit reading, then resumes one character in rather than after
+  it, so `1234 4111 1111 1111 1111` is still caught. Dots are not accepted as
+  separators, so `192.168.1.1` and `v1.2.3` cannot match.
+- **Emails** require a dot-separated TLD of 2–63 letters, so `user@localhost`
+  and `@mentions` do not match.
+
+Thirteen near-miss strings (phone numbers, IPs, version strings, dates,
+Luhn-invalid card-length numbers, bare domains) are asserted unchanged, both as
+a single chunk *and* streamed one character at a time.
+
+## Unicode
+
+Redaction operates on `str`, and encoding to UTF-8 happens in the response
+generator **after** redaction, on complete strings. The redactor therefore never
+sees half a multi-byte sequence and a wire chunk boundary can never fall inside
+a character. Tests stream emoji and CJK text one character at a time with PII
+embedded.
+
+## Mid-stream failures
+
+Once the first byte is sent the status code is committed, so an upstream failure
+cannot become a 502. The gateway flushes whatever is safely redacted, appends
+one sanitized sentinel, and closes:
+
+```
+\n[gateway-error] upstream_stream_failed\n
+```
+
+A clean close, not a hang, carrying no provider detail. Tests plant a password
+and an internal hostname in the upstream exception and assert neither reaches
+the client. A provider that fails *before* any bytes are sent still gets a
+proper `502` with a structured error body.
+
+## Performance
+
+The redactor was profiled, not guessed at. `find_matches` was 94% of stream
+time, and the cause was the **email** pattern rather than the card pattern: its
+local-part class `[A-Za-z0-9._%+\-]` includes digits, so on a long digit run the
+engine consumed the whole run at every start position and then backtracked one
+character at a time looking for an `@` that was not there — quadratic.
+
+| Workload | Before | After |
+| --- | --- | --- |
+| Digit-heavy, 70-char chunks | 0.43 MB/s | **5.24 MB/s** |
+| Prose, 1-char chunks | 0.01 MB/s | **~0.3 MB/s** |
+| Prose, 70-char chunks | 4.66 MB/s | **6.53 MB/s** |
+| Single scan of a 326-char digit buffer | 161 µs | **6 µs** |
+
+All throughput figures are machine-dependent; compare them only within one
+session. The 1-char row, for example, has measured 0.31, ~0.25 and 0.39 MB/s
+in different sessions. `../../bench/run_all.sh` re-measures them.
+
+A second round then addressed the hold-back scan, which had become the
+bottleneck once the quadratic path was gone. `PARTIAL` is anchored to the end of
+the buffer with `\Z`, so a greedy quantifier that overshoots backtracks one
+character at a time and fails at every length. Every quantifier is now
+*possessive*, which is safe precisely because of that anchor — the maximal
+consumption is the only one that can reach the end.
+
+| Workload (same-session A/B) | Before | After |
+| --- | --- | --- |
+| One `PARTIAL` search, 68-char buffer | 38.6 µs | **17.1 µs** |
+| Ordinary prose, 70-char chunks | 4.94 MB/s | **7.72 MB/s** |
+| PII-dense text, 68-char chunks | 1.27 MB/s | **2.11 MB/s** |
+
+`tests/test_partial_equivalence.py` checks the possessive form against the
+original backtracking one over 25,000+ randomised inputs, every prefix of every
+test secret, and buffers longer than the hold-back window.
+
+The fix is a *content gate*, not a rewritten regex: an email cannot match text
+containing no `@`, and neither SSNs nor cards can match text containing no
+digit, so `_pattern_for` selects the narrowest variant that can still match.
+For ASCII digits, dropping an alternative that cannot match anywhere cannot
+change the result.
+
+**Limitation: non-ASCII digits.** The digit probe is ASCII `[0-9]`, but the SSN
+and card patterns use `\d`, which also matches full-width, Arabic-Indic and
+other Unicode digits. So text whose *only* digits are non-ASCII skips the
+numeric scan: `SSN １２３-４５-６７８９` matches the full pattern but is not
+redacted by `find_matches`. It is redacted only if an ASCII digit happens to be
+in the same buffer. The equivalence tests below use ASCII digits only, so they
+do not cover this case.
+
+A possessive-quantifier rewrite was considered and rejected while the card
+pattern was still `\b\d(?:[ -]?\d){12,18}\b`. In `"4111111111111111 2222"` that
+pattern has to backtrack to find the 16-digit card; `{12,18}+` would have taken
+19 digits across the space, failed the trailing `\b`, and matched nothing. The
+current `CARD` uses fixed group sizes (see *Avoiding false positives*), so that
+example no longer applies to it. The content gate is what shipped either way.
+
+**This is an optimisation applied to a security control, so it is held to a
+higher bar than "the other tests still pass."** `tests/test_pattern_equivalence.py`
+compares the narrowed path against the unoptimised full alternation over 19,000
+randomised inputs — random strings, compositions of real PII and near-misses,
+digit runs around the card window, adversarial `@` placements in digit runs, and
+cards glued to random digit groups — plus every card-length boundary, using
+an independent Luhn implementation in the oracle so the two share no code path.
+
+`tests/test_performance_properties.py` guards the algorithmic behaviour without
+depending on absolute timings (throughput numbers belong in `bench/`, where a
+noisy CI box cannot fail a build). With the content gate reverted
+(`_pattern_for` always returning the full alternation), 7 of its 11 tests
+failed in a measured run: both mechanism checks; the four linear-scaling checks
+on runs the email pattern can absorb, where 8× the input cost 58–68× the time
+against a 20× ceiling; and the 50,000-digit budget, at 2.64 s against 2.0 s.
+That last margin is the machine-dependent one.
+
+## Observability
+
+Every response carries `X-Request-Id`, honouring a caller-supplied value so this
+hop joins an existing trace. A streamed response commits its status with the
+first byte, so when something fails mid-stream that id is the only thing a user
+can quote — it is stamped on the failure log line, and a test asserts the two
+match.
+
+## The provider integration
+
+The redaction algorithm was always well covered — every secret split at every
+interior position, and character by character. What was **not** covered was the
+only class that runs in production.
+
+`AnthropicProvider.stream` was marked `# pragma: no cover - needs a key` and
+had never executed. Every one of the other tests drove a mock. So the "253 tests
+passing" of that time said nothing about the integration an operator actually
+uses, and the guardrail had never been demonstrated against a real provider
+response.
+
+Two changes close that:
+
+- **The SDK client is injected** (`client_factory`), so `stream()` itself is
+  testable. The pragma is gone. `tests/test_anthropic_contract.py` drives that
+  exact method — its own `async with`, its iteration over `text_stream`, its
+  error normalisation — against a stub implementing the SDK's streaming
+  surface. If a future SDK release changes that shape, these fail, which is the
+  point: they are a contract, not a mock of our own code. They also assert the
+  model id and output budget actually sent, sweep delta widths of 1, 2, 3, 5
+  and 8 characters, and check that a mid-stream failure still flushes a
+  *redacted* tail.
+- **The default follows the environment.** With `LLM_PROVIDER` unset, a present
+  `ANTHROPIC_API_KEY` now selects the real provider. Previously the documented
+  run command served the scripted fixture even when a key was available, so
+  nothing an operator saw exercised a real provider response. With no key it
+  still falls back to the mock — and logs a warning saying so.
+
+Verify it yourself:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+uvicorn app:app --port 8000
+curl -sN -X POST localhost:8000/v1/generate -H 'content-type: application/json' \
+  -d '{"prompt":"Write a short fake support note containing a made-up email address, a made-up US SSN, and a made-up Visa card number."}'
+```
+
+## Key design tradeoff
+
+The interesting choice was **adaptive hold-back versus a fixed tail window**. A
+fixed N-character window is three lines of code, but it delays the first token
+until N characters have accumulated — on every request, forever, to guard
+against PII that is usually not there. Computing the longest suffix that could
+still *become* PII costs one extra anchored regex per chunk and lets ordinary
+prose flush immediately while still guaranteeing the full split-width. The
+`max_hold` cap stays as a floor purely so an adversarial input (a megabyte of
+digits, which is an unbounded "might still be a card" prefix) cannot grow the
+buffer without limit.
+
+The second tradeoff is **Luhn validation on cards**: it makes redaction
+*less* aggressive, which sounds wrong for a guardrail. But a gateway that
+redacts every 16-digit number destroys order IDs, tracking numbers, and
+timestamps, and users route around a guardrail they cannot trust. Luhn is the
+structural test the card networks themselves define, so a genuine PAN passes by
+construction and the false-positive rate on long digit runs drops by roughly an
+order of magnitude.

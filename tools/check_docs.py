@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Documentation-coverage checker.
+
+Enforces the project's documentation standard, so "everything is documented"
+is a build step rather than a claim:
+
+* **Source modules** (everything that is not a test) must have a docstring on
+  every module, class, function, method, and property. This is enforced -- a
+  gap fails the check.
+* **Test support code** -- fixtures, helpers, and any non-``test_`` function in
+  a test module -- must also be documented, because those names describe
+  plumbing rather than behaviour.
+* **Test functions themselves** (``test_*`` in a test module) must also be
+  documented -- this is enforced too, so an undocumented test fails the check.
+  The bar is that the docstring says something the name does not: why the
+  case matters, where the boundary is, which failure it guards against.
+  The checker can only verify that a docstring exists, not that it adds
+  anything; that part is a review standard.
+
+All three categories are enforced: any gap in any of them makes the check exit
+1 and list the undocumented definitions on stderr.
+
+Dunder methods with no behaviour of their own (``__aiter__``, ``__aenter__``
+and friends implementing a stdlib protocol) are exempt: the protocol is the
+documentation, and the class docstring says which protocol.
+
+Usage::
+
+    python tools/check_docs.py [root]
+
+``root`` defaults to the repository's ``fde-assessment`` directory, located
+relative to this script, so the checker works from any working directory rather
+than only from the repository root. ``./run_tests.sh`` runs it twice: once on
+``fde-assessment`` and once on ``tools``. It uses only the standard library.
+"""
+
+from __future__ import annotations
+
+import ast
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# Protocol dunders whose meaning is fixed by the language, not by us.
+EXEMPT_DUNDERS = {
+    "__init__", "__aiter__", "__anext__", "__aenter__", "__aexit__",
+    "__iter__", "__next__", "__enter__", "__exit__", "__call__", "__str__",
+    "__repr__", "__eq__", "__hash__", "__len__",
+}
+
+
+@dataclass
+class Report:
+    """Counts and gap lists for one category of code."""
+
+    label: str
+    documented: int = 0
+    total: int = 0
+    gaps: list[str] = field(default_factory=list)
+
+    def record(self, ok: bool, where: str) -> None:
+        """Register one inspected definition."""
+        self.total += 1
+        if ok:
+            self.documented += 1
+        else:
+            self.gaps.append(where)
+
+    @property
+    def percent(self) -> float:
+        """Documented share, as a percentage. 100.0 when there is nothing to check."""
+        return 100.0 if not self.total else 100.0 * self.documented / self.total
+
+
+def is_test_module(path: Path) -> bool:
+    """Whether ``path`` is test code rather than shipped source."""
+    return path.name.startswith("test_") or path.name == "conftest.py" or "tests" in path.parts
+
+
+def check(root: Path) -> tuple[Report, Report, Report]:
+    """Walk ``root`` and classify every definition into the three reports."""
+    source = Report("source")
+    support = Report("test support")
+    tests = Report("test functions")
+
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        testish = is_test_module(path)
+        target = support if testish else source
+        target.record(bool(ast.get_docstring(tree)), f"{path}: module")
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                name, kind = node.name, "class"
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name, kind = node.name, "function"
+                if name in EXEMPT_DUNDERS:
+                    continue
+            else:
+                continue
+            documented = bool(ast.get_docstring(node))
+            where = f"{path}:{node.lineno}: {kind} {name}"
+            if testish and name.startswith("test_"):
+                tests.record(documented, where)
+            else:
+                target.record(documented, where)
+
+    return source, support, tests
+
+
+# The assessment lives next to this script's parent directory. Deriving it from
+# __file__ rather than the working directory means `python tools/check_docs.py`
+# behaves the same wherever it is invoked from.
+DEFAULT_ROOT = Path(__file__).resolve().parent.parent / "fde-assessment"
+
+
+def main(argv: list[str]) -> int:
+    """Print the report and exit non-zero if an enforced category has gaps."""
+    root = Path(argv[1]) if len(argv) > 1 else DEFAULT_ROOT
+    if not root.is_dir():
+        print(f"no such directory: {root}", file=sys.stderr)
+        return 2
+
+    source, support, tests = check(root)
+    for report in (source, support, tests):
+        print(
+            f"{report.label:15} {report.documented:4}/{report.total:4} "
+            f"({report.percent:5.1f}%)  [enforced]"
+        )
+
+    failures = [r for r in (source, support, tests) if r.gaps]
+    if not failures:
+        print("\ndocumentation check passed")
+        return 0
+
+    for report in failures:
+        print(f"\nundocumented {report.label}:", file=sys.stderr)
+        for gap in report.gaps:
+            print(f"  {gap}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

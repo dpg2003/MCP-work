@@ -1,0 +1,30 @@
+{
+  "_comment": "Point TENANTS_FILE at a copy of this file. Keys may be plaintext (hashed on load) or pre-hashed as 'sha256:<hex>' so the plaintext never has to live in the file. Generate a hash with: python -c \"import sys,tenants; print(tenants.hash_key(sys.argv[1]))\" <key>",
+
+  "tiers": {
+    "free":       { "tokens_per_minute": 10000,  "requests_per_minute": 60,   "max_concurrent": 4 },
+    "pro":        { "tokens_per_minute": 50000,  "requests_per_minute": 300,  "max_concurrent": 16 },
+    "enterprise": { "tokens_per_minute": 500000, "requests_per_minute": 3000, "max_concurrent": 64 }
+  },
+
+  "tenants": [
+    {
+      "tenant_id": "acme",
+      "tier": "enterprise",
+      "api_keys": [
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      ]
+    },
+    {
+      "tenant_id": "globex",
+      "tier": "pro",
+      "api_keys": ["replace-me-with-a-generated-key", "replace-me-second-key-for-rotation"],
+      "overrides": { "requests_per_minute": 120 }
+    },
+    {
+      "tenant_id": "initech",
+      "tier": "free",
+      "api_keys": ["replace-me-too"]
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+"""Upstream text-generation providers.
+
+Two implementations behind one interface (``AsyncIterator[str]`` of text
+deltas), selected by the ``LLM_PROVIDER`` environment variable:
+
+* ``mock``      -- a scripted stream with configurable chunking, per-chunk
+                   latency, and failure injection. The default, so the gateway
+                   runs and is testable with no API key.
+* ``anthropic`` -- the real Anthropic Messages API with streaming enabled.
+
+Keeping the provider boundary at "async iterator of text deltas" is what lets
+the redaction layer be tested exhaustively without any network at all.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import logging
+from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
+
+
+logger = logging.getLogger("fde.providers")
+
+
+class UpstreamStreamError(Exception):
+    """The upstream stream failed or produced something undecodable."""
+
+
+@dataclass
+class MockProvider:
+    """Scripted stream. The chunk boundaries are the whole point of the tests."""
+
+    chunks: Sequence[str] = field(default_factory=list)
+    delay_seconds: float = 0.0
+    fail_after: int | None = None
+    failure: Exception | None = None
+
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
+        """Yield the scripted chunks, optionally failing partway through.
+
+        Args:
+            prompt: Ignored; the response is scripted.
+
+        Yields:
+            Each configured chunk, after ``delay_seconds``.
+
+        Raises:
+            Exception: ``failure`` (default ``UpstreamStreamError``) once
+                ``fail_after`` chunks have been yielded.
+        """
+        for index, chunk in enumerate(self.chunks):
+            if self.fail_after is not None and index >= self.fail_after:
+                raise self.failure or UpstreamStreamError("upstream dropped the connection")
+            if self.delay_seconds:
+                await asyncio.sleep(self.delay_seconds)
+            yield chunk
+        if self.fail_after is not None and self.fail_after >= len(self.chunks):
+            raise self.failure or UpstreamStreamError("upstream dropped the connection")
+
+
+@dataclass
+class SSEMockProvider:
+    """Mock that emits raw SSE frames, so decode failures can be exercised.
+
+    Real providers hand you framed events, and a truncated or corrupt frame is
+    a genuine failure mode. This provider parses its own frames the way the
+    Anthropic path does, so ``UpstreamStreamError`` is raised from the same
+    place either way.
+    """
+
+    frames: Sequence[str] = field(default_factory=list)
+    delay_seconds: float = 0.0
+
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
+        """Parse the scripted SSE frames and yield their text deltas.
+
+        Yields:
+            The ``delta.text`` of each ``content_block_delta`` event, stopping
+            at ``[DONE]``.
+
+        Raises:
+            UpstreamStreamError: A frame's payload is not decodable JSON or is
+                not a JSON object -- the corrupt-frame failure mode.
+        """
+        for frame in self.frames:
+            if self.delay_seconds:
+                await asyncio.sleep(self.delay_seconds)
+            if not frame.startswith("data: "):
+                continue
+            body = frame[len("data: ") :].strip()
+            if body == "[DONE]":
+                return
+            try:
+                event = json.loads(body)
+            except ValueError as exc:
+                raise UpstreamStreamError("undecodable event from upstream") from exc
+            if not isinstance(event, dict):
+                raise UpstreamStreamError("upstream event was not an object")
+            if event.get("type") == "content_block_delta":
+                delta = event.get("delta") or {}
+                text = delta.get("text")
+                if isinstance(text, str):
+                    yield text
+
+
+DEFAULT_SCRIPT = [
+    "Sure — here is the customer summary you asked for.\n\n",
+    "The account owner is Jane Roe and her contact address is jane.r",
+    "oe@example.com. She last logged in on Tuesday.\n",
+    "Her social security number on file is 123-",
+    "45-",
+    "6789, and the card ending in the visible digits is ",
+    "4111 1111 ",
+    "1111 1111.\n",
+    "Her support ticket reference is 123456789 and the server she reported ",
+    "the issue from was 192.168.1.1 running v1.2.3 — neither of which is PII.\n",
+]
+
+
+class AnthropicProvider:
+    """Real Anthropic streaming. Requires ``ANTHROPIC_API_KEY``.
+
+    The SDK client is supplied by ``client_factory`` rather than constructed
+    inline. That is what makes this class testable: the previous version built
+    its own client, so the only code path that runs in production could not be
+    exercised at all and was marked ``# pragma: no cover``. It is now covered by
+    contract tests that drive this exact method against a stub implementing the
+    SDK's streaming surface.
+    """
+
+    def __init__(self, model: str | None = None, max_tokens: int = 1024,
+                 client_factory=None) -> None:
+        """Configure the model and output budget; the client is built lazily.
+
+        Args:
+            model: Model id. Defaults to ``ANTHROPIC_MODEL``, then
+                ``claude-sonnet-5``.
+            max_tokens: Output budget for the request.
+            client_factory: Zero-argument callable returning an object shaped
+                like ``anthropic.AsyncAnthropic``. Injected by the contract
+                tests; production leaves it unset.
+        """
+        self.model = model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+        self.max_tokens = max_tokens
+        self._client_factory = client_factory
+        self._client = None
+
+    def _get_client(self):
+        """Build the client on first use.
+
+        Deferred so importing this module never needs an API key, and so a
+        missing key surfaces as a normalised ``UpstreamStreamError`` rather than
+        an import-time crash.
+
+        Raises:
+            UpstreamStreamError: The SDK is absent, or no API key is set.
+        """
+        if self._client is None:
+            if self._client_factory is not None:
+                self._client = self._client_factory()
+                return self._client
+            try:
+                from anthropic import AsyncAnthropic
+            except ImportError as exc:
+                raise UpstreamStreamError("anthropic SDK is not installed") from exc
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise UpstreamStreamError("ANTHROPIC_API_KEY is not set")
+            self._client = AsyncAnthropic()
+        return self._client
+
+    async def stream(self, prompt: str) -> AsyncIterator[str]:
+        """Stream text deltas from the Anthropic Messages API.
+
+        Yields:
+            Successive text deltas, exactly as the SDK produces them, so the
+            redaction layer sees real token boundaries rather than boundaries
+            chosen by a fixture.
+
+        Raises:
+            UpstreamStreamError: Any provider failure. Only the exception
+                *type* is retained, so no provider-specific message, body or
+                hostname can reach the client.
+        """
+        client = self._get_client()
+        try:
+            async with client.messages.stream(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                async for text in stream.text_stream:
+                    yield text
+        except UpstreamStreamError:
+            raise
+        except Exception as exc:
+            # Never let a provider-specific exception shape reach the client.
+            raise UpstreamStreamError(f"anthropic stream failed: {type(exc).__name__}") from exc
+
+
+def provider_from_env():
+    """Build the provider named by ``LLM_PROVIDER``.
+
+    When ``LLM_PROVIDER`` is unset the choice follows the environment rather
+    than always falling back to the fixture: if ``ANTHROPIC_API_KEY`` is
+    present the real provider is used, otherwise the mock. Defaulting to the
+    mock even when a key was available meant the documented run command never
+    exercised a real provider response, which is exactly the gap this closes.
+
+    Raises:
+        ValueError: ``LLM_PROVIDER`` names an unknown provider.
+    """
+    configured = os.environ.get("LLM_PROVIDER")
+    if configured:
+        name = configured.lower()
+    elif os.environ.get("ANTHROPIC_API_KEY"):
+        name = "anthropic"
+        logger.info("ANTHROPIC_API_KEY detected; using the real Anthropic provider")
+    else:
+        name = "mock"
+        logger.warning(
+            "no ANTHROPIC_API_KEY and no LLM_PROVIDER set - serving the scripted "
+            "mock provider. Redaction is real, but the upstream is a fixture."
+        )
+    if name == "anthropic":
+        return AnthropicProvider()
+    if name == "mock":
+        return MockProvider(
+            chunks=DEFAULT_SCRIPT,
+            delay_seconds=float(os.environ.get("MOCK_CHUNK_DELAY_SECONDS", "0.05")),
+        )
+    raise ValueError(f"unknown LLM_PROVIDER: {name!r} (expected 'mock' or 'anthropic')")
