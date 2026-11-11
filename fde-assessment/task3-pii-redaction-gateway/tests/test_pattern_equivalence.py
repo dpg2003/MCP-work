@@ -22,15 +22,31 @@ from redactor import PATTERN, REPLACEMENT, find_matches, redact_complete
 
 
 def reference_matches(text: str) -> list[tuple[int, int, str]]:
-    """Spans found by the full alternation with no narrowing — the oracle."""
+    """Spans found by the full alternation with no narrowing — the oracle.
+
+    Applies the scan rule independently of ``find_matches``: a card candidate
+    that fails Luhn falls back to its 16-digit 4-4-4-4 reading, and otherwise
+    the scan resumes one character after its start, never after its end.
+    """
     out = []
-    for match in PATTERN.finditer(text):
-        if match.groupdict().get("card") is not None:
-            digits = re.sub(r"[^0-9]", "", match.group())
-            if not (13 <= len(digits) <= 19 and _luhn(digits)):
-                continue
-        out.append((match.start(), match.end(), match.group()))
+    position = 0
+    while (match := PATTERN.search(text, position)) is not None:
+        start, group = match.start(), match.group()
+        if match.groupdict().get("card") is None or _is_card(group):
+            out.append((start, match.end(), group))
+            position = match.end()
+        elif re.fullmatch(r"\d{4}([ -])\d{4}\1\d{4}\1\d{4}\1\d{1,3}", group) and _is_card(group[:19]):
+            out.append((start, start + 19, group[:19]))
+            position = start + 19
+        else:
+            position = start + 1
     return out
+
+
+def _is_card(candidate: str) -> bool:
+    """The 13-19 digit window plus the independent Luhn check below."""
+    digits = re.sub(r"[^0-9]", "", candidate)
+    return 13 <= len(digits) <= 19 and _luhn(digits)
 
 
 def _luhn(digits: str) -> bool:
@@ -144,6 +160,40 @@ def test_adversarial_at_sign_placements_agree():
     for _ in range(2000):
         chars = [rng.choice("0123456789@.- ") for _ in range(rng.randint(1, 60))]
         assert_equivalent("".join(chars))
+
+
+@pytest.mark.parametrize("prefix", ["", "a@b.cc "])
+@pytest.mark.parametrize(
+    "text, card",
+    [
+        ("Item 2 4111 1111 1111 1111 paid", "4111 1111 1111 1111"),      # rescan past a leading group
+        ("1234 4111 1111 1111 1111", "4111 1111 1111 1111"),             # rescan inside a rejected 4-4-4-4
+        ("Card 4111 1111 1111 1111 123 ok", "4111 1111 1111 1111"),      # 16-digit fallback
+        ("Card 6205 5000 0000 0000 004 ok", "6205 5000 0000 0000 004"),  # 19-digit reading kept
+    ],
+)
+def test_luhn_rejection_paths_agree_under_both_gates(prefix, text, card):
+    """Each way a rejected card candidate is retried, with and without an '@', so both narrowed patterns take it."""
+    assert_equivalent(prefix + text)
+    assert [span[2] for span in optimised_matches(prefix + text) if span[2] != "a@b.cc"] == [card]
+
+
+def _digit_group(rng: random.Random) -> str:
+    """A random 0-5 digit group, the shape of an expiry, CVV, quantity or reference."""
+    return "".join(rng.choice(string.digits) for _ in range(rng.randint(0, 5)))
+
+
+def test_random_cards_beside_digit_groups_agree():
+    """5000 cards and Luhn-failing runs glued to random digit groups, the input shape that needs the rescan."""
+    rng = random.Random(8675309)
+    cards = [VISA, VISA_SPACED, "4111-1111-1111-1111", AMEX, "3782 822463 10005",
+             "6205 5000 0000 0000 004", "1234 5678 9012 3456", "4222222222222"]
+    for _ in range(5000):
+        parts = [rng.choice(["", "a@b.cc ", "x "]), _digit_group(rng)]
+        for _ in range(rng.randint(1, 3)):
+            parts += [rng.choice([" ", "-", "", "/"]), rng.choice(cards),
+                      rng.choice([" ", "-", ""]), _digit_group(rng)]
+        assert_equivalent("".join(parts))
 
 
 @pytest.mark.parametrize("length", [1, 12, 13, 14, 15, 16, 17, 18, 19, 20, 25, 40])

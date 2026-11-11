@@ -226,6 +226,53 @@ def test_domain_in_prose_is_not_an_email():
 
 
 # --------------------------------------------------------------------------
+# A Luhn-failing digit run must not hide the card inside it
+# --------------------------------------------------------------------------
+CARD_NEXT_TO_OTHER_DIGITS = [
+    ("Visa 4111 1111 1111 1111 12/28, thanks", f"Visa {REPLACEMENT} 12/28, thanks"),
+    ("Jane Roe 4111111111111111 12/28 123", f"Jane Roe {REPLACEMENT} 12/28 123"),
+    ("Card 4111 1111 1111 1111 123 on file.", f"Card {REPLACEMENT} 123 on file."),
+    ("Card 4111-1111-1111-1111-123 ok", f"Card {REPLACEMENT}-123 ok"),
+    ("Item 2 4111 1111 1111 1111 paid.", f"Item 2 {REPLACEMENT} paid."),
+    ("MC 5500 0000 0000 0004 09/27", f"MC {REPLACEMENT} 09/27"),
+    ("1234 4111 1111 1111 1111", f"1234 {REPLACEMENT}"),
+    ("ref 99 4111 1111 1111 1111 ok", f"ref 99 {REPLACEMENT} ok"),
+]
+
+
+@pytest.mark.parametrize("text, expected", CARD_NEXT_TO_OTHER_DIGITS)
+def test_card_next_to_other_digits_is_redacted(text, expected):
+    """A card beside an expiry, CVV, quantity or reference: the combined run fails Luhn and used to hide the whole card."""
+    assert redact_complete(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", CARD_NEXT_TO_OTHER_DIGITS)
+def test_card_next_to_other_digits_is_redacted_however_streamed(text, expected):
+    """The same inputs split at every point, one character at a time, and in fixed widths 1-8."""
+    chunkings = [[text[:cut], text[cut:]] for cut in range(1, len(text))]
+    chunkings.append(list(text))
+    chunkings.extend(split_every(text, width) for width in range(1, 9))
+    for chunks in chunkings:
+        assert stream_through(chunks) == expected, chunks
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        "6205 5000 0000 0000 004",   # 19 digits, 4-4-4-4-3
+        "6205-5000-0000-0000-004",
+        "4000 0000 0000 0000 02",    # 18 digits
+        "4000 0000 0000 0000 6",     # 17 digits
+    ],
+)
+def test_long_card_in_groups_of_four_is_redacted_whole(card):
+    """A 17-19 digit card in groups of four whose first 16 digits fail Luhn, so only the full reading catches it."""
+    text = f"card {card} end"
+    assert redact_complete(text) == f"card {REPLACEMENT} end"
+    assert stream_through(list(text)) == f"card {REPLACEMENT} end"
+
+
+# --------------------------------------------------------------------------
 # Unicode
 # --------------------------------------------------------------------------
 def test_unicode_and_emoji_are_preserved_exactly():

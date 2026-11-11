@@ -72,10 +72,30 @@ EMAIL = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(?:\.[A-Za
 # often than it is an SSN.
 SSN = r"\b\d{3}(?P<ssn_sep>[- ])\d{2}(?P=ssn_sep)\d{4}\b"
 
-# Card: 13-19 digits, single optional space/hyphen between digits, then a Luhn
-# check (see _passes_luhn). Dots are not accepted as separators, so "192.168.1.1"
-# and version strings cannot match.
-CARD = r"\b\d(?:[ -]?\d){12,18}\b"
+# Card: 13-19 digits in a real PAN layout, then a Luhn check (see _passes_luhn).
+# Either unseparated, or grouped 4-4-4-4-x (17-19 digits), 4-4-4-x (13-19) or
+# 4-6-x (Amex/Diners), with ONE separator -- a single space or hyphen -- used
+# throughout. Fixing the group sizes is what stops a card absorbing a
+# neighbouring expiry, CVV or quantity ("4111 1111 1111 1111 12/28"): the
+# combined digits fail Luhn, and the real card inside them would be lost (see
+# find_matches). Dots are not accepted as separators, so "192.168.1.1" and
+# version strings cannot match.
+CARD = (
+    r"\b(?:"
+    r"\d{13,19}"
+    r"|\d{4}(?P<card_sep>[ -])\d{4}(?P=card_sep)\d{4}(?P=card_sep)"
+    r"(?:\d{4}(?P=card_sep)\d{1,3}|\d{1,7})"
+    r"|\d{4}(?P<card_sep_4_6>[ -])\d{6}(?P=card_sep_4_6)\d{4,5}"
+    r")\b"
+)
+
+# The 16-digit reading of a 4-4-4-4-x candidate: "4111 1111 1111 1111 123" is a
+# 19-digit card or a 16-digit card plus its CVV, and only Luhn can tell which.
+# The longer reading is tried first, so a mistake over-redacts a CVV rather than
+# leaking the tail of a 19-digit card; this is the fallback when it fails.
+_CARD_FIRST_FOUR_GROUPS = re.compile(
+    r"(?P<card>\d{4}(?P<sep>[ -])\d{4}(?P=sep)\d{4}(?P=sep)\d{4})(?=(?P=sep)\d)"
+)
 
 # The full alternation, and two cheaper specialisations of it.
 #
@@ -175,15 +195,32 @@ def _is_real_match(match: re.Match[str]) -> bool:
 def find_matches(text: str) -> Iterable[re.Match[str]]:
     """Yield the matches that survive post-filtering, in order, non-overlapping.
 
-    Results are identical to scanning with :data:`PATTERN`; see
+    A card candidate that fails Luhn is never allowed to consume its span,
+    because a real card may overlap it. The 16-digit reading at the same start
+    is tried first (a card followed by its CVV); failing that, scanning resumes
+    one character after the candidate's *start*, so a card that begins inside
+    it (``"Item 2 4111 1111 1111 1111"``) is still found. ``finditer`` cannot do
+    this: it resumes at the end of the regex match, before Luhn has run.
+
+    Results are identical to running the same scan with :data:`PATTERN`; see
     :func:`_pattern_for` for why narrowing is safe.
     """
     pattern = _pattern_for(text)
     if pattern is None:
         return
-    for match in pattern.finditer(text):
+    position = 0
+    while (match := pattern.search(text, position)) is not None:
         if _is_real_match(match):
             yield match
+            position = match.end()
+            continue
+        # Only card candidates are ever rejected.
+        shorter = _CARD_FIRST_FOUR_GROUPS.match(text, match.start())
+        if shorter is not None and shorter.end() < match.end() and _is_real_match(shorter):
+            yield shorter
+            position = shorter.end()
+        else:
+            position = match.start() + 1
 
 
 def _partial_prefix_start(text: str, max_hold: int = DEFAULT_MAX_HOLD) -> int:

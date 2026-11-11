@@ -114,10 +114,15 @@ reviews the transcript — but redacting the answer the user asked for. So:
 - **SSN** requires the `3-2-4` grouping with a consistent explicit separator. A
   bare 9-digit run is a product code far more often than an SSN, so
   `123456789` is left alone.
-- **Cards** are 13–19 digits with single optional space/hyphen separators, then
-  a **Luhn** checksum. That is what stops a 16-digit order number being redacted.
-  Dots are not accepted as separators, so `192.168.1.1` and `v1.2.3` cannot
-  match.
+- **Cards** are 13–19 digits, unseparated or in a standard grouping — 4-4-4-4
+  with an optional 1–3 digit fifth group, 4-4-4-x, or Amex/Diners 4-6-x — with
+  one space or hyphen used throughout, then a **Luhn** checksum. That is what
+  stops a 16-digit order number being redacted. Fixed groups stop a card
+  absorbing a neighbouring expiry, CVV or quantity (`4111 1111 1111 1111 12/28`),
+  and a candidate that fails Luhn never hides a card it overlaps: the scanner
+  tries its 16-digit reading, then resumes one character in rather than after
+  it, so `Item 2 4111 1111 1111 1111` is still caught. Dots are not accepted as
+  separators, so `192.168.1.1` and `v1.2.3` cannot match.
 - **Emails** require a dot-separated TLD of 2–63 letters, so `user@localhost`
   and `@mentions` do not match.
 

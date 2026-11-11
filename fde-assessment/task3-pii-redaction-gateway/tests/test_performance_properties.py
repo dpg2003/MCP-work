@@ -49,6 +49,16 @@ def test_scan_cost_scales_linearly_with_input_size(filler):
     assert ratio < 20, f"8x the input cost {ratio:.1f}x the time -- superlinear"
 
 
+@pytest.mark.parametrize("filler", ["1111 ", "1111-"])
+def test_rescan_after_a_luhn_failure_scales_linearly(filler):
+    """Every 4-4-4-4 window here fails Luhn, so the scan restarts inside each rejected candidate; 8x input must not cost ~64x."""
+    small = filler * 800
+    large = filler * 6_400
+
+    ratio = time_scan(large) / max(time_scan(small), 1e-9)
+    assert ratio < 20, f"8x the input cost {ratio:.1f}x the time -- superlinear"
+
+
 def test_a_long_digit_run_does_not_take_the_email_path():
     """The specific input that was quadratic: digits with no '@' anywhere."""
     text = "7" * 50_000

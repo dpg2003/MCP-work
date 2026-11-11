@@ -15,7 +15,7 @@ import string
 import pytest
 
 from conftest import AMEX, EMAIL, MASTERCARD, SSN, VISA, VISA_SPACED
-from redactor import DEFAULT_MAX_HOLD, PARTIAL, _partial_prefix_start
+from redactor import CARD, DEFAULT_MAX_HOLD, PARTIAL, _partial_prefix_start
 
 # The original, backtracking form. Kept here as the oracle only.
 REFERENCE = re.compile(
@@ -68,6 +68,29 @@ def test_every_prefix_of_every_secret_matches(secret):
     """Every partially-arrived secret is where the hold-back decision matters."""
     for length in range(len(secret) + 1):
         assert_equivalent("some prose " + secret[:length])
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        "6205500000000000004",        # unseparated, 19
+        "4111 1111 1111 1111",        # 4-4-4-4
+        "4111-1111-1111-1111",
+        "4222 2222 2222 2",           # 4-4-4-1
+        "6205 5000 0000 0000 004",    # 4-4-4-4-3
+        "6205-5000-0000-0000-004",
+        "3782 822463 10005",          # 4-6-5
+        "3056-930902-5904",           # 4-6-4
+    ],
+)
+def test_hold_back_covers_every_prefix_of_every_card_layout(card):
+    """No prefix of any accepted card layout is emitted early: the hold-back always starts at or before the card."""
+    assert re.fullmatch(CARD, card), "not an accepted layout"
+    prose = "card on file: "
+    for length in range(1, len(card) + 1):
+        text = prose + card[:length]
+        assert _partial_prefix_start(text) <= len(prose), repr(text)
+        assert_equivalent(text)
 
 
 # --------------------------------------------------------------------------
