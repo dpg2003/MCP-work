@@ -1,0 +1,6 @@
+{
+  "extraKnownMarketplaces": {
+    "daniel-agents": { "source": { "source": "github", "repo": "dpg2003/daniel-agents" } }
+  },
+  "enabledPlugins": { "dev-agents@daniel-agents": true }
+}
