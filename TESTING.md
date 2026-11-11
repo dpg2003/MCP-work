@@ -33,7 +33,7 @@ finishes, everything below works.
 | Tests: Task 2 - security gateway | 105 tests |
 | Tests: Task 3 - PII redaction | 319 tests |
 | Tests: Task 4 - rate limit router | 209 tests (~65 s) |
-| Benchmarks: run all | Prints throughput and latency numbers. Currently exits 1 after the concurrency-4 gateway run; see the known issue in the root README |
+| Benchmarks: run all | Prints throughput and latency numbers (~6 s). Exits 1 only if a benchmark fails to run |
 | Docs: coverage check | Enforces 100% docstring coverage on source, test support and test functions in `fde-assessment/` |
 | **Assessment: run the 54-case matrix** | Runs every case from the assessment test-case document and writes `ASSESSMENT_RESULTS.md` |
 
@@ -89,12 +89,12 @@ shuts everything down. Nothing is left running. It uses ports 9000, 9001, 8000,
 - **Task 3** — an email, SSN and card redacted mid-stream even though the mock
   upstream splits each across chunk boundaries, with the ticket number, IP
   address and version string preserved.
-- **Task 4** — a healthy call, a 429 triggering failover, and both providers
-  down yielding one sanitized error. **Known issue:** the final "exhausting a
-  150-token budget" step no longer shows a 429. The demo sets
-  `RATE_LIMIT_TOKENS=150`, but the gateway now applies the tenant's own quota
-  (50,000 tokens for the demo `key-acme` tenant), so all four requests return
-  HTTP 200 and the "429 body" printed is a normal success response.
+- **Task 4** — a healthy call, a 429 triggering failover, both providers down
+  yielding one sanitized error, and a token budget being exhausted into a clean
+  429. The gateway applies each tenant's own quota, so the budget step uses an
+  extra demo tenant, `key-budget`, capped at 150 tokens per window. Its first
+  three requests return HTTP 200, the fourth returns 429, and the
+  `rate_limit_exceeded` body that follows names the `tokens` limit.
 
 ---
 

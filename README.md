@@ -21,7 +21,7 @@ From a terminal:
 ./run_tests.sh       # doc check + config check + all four test suites
 ./tools/demo.sh      # end-to-end walkthrough of all four services
 .venv/bin/python tools/assessment/run_matrix.py   # the 54-case assessment scorecard
-./bench/run_all.sh   # optional: re-measure the performance numbers (see the known issue below)
+./bench/run_all.sh   # optional: re-measure the performance numbers
 ```
 
 That is the whole setup. `./setup.sh` needs network access: it installs the
@@ -316,13 +316,14 @@ Every change below was driven by a profile or a measurement, and every one is
 guarded by a test that fails if it is reverted. Re-measure the numbers with
 `./bench/run_all.sh`.
 
-**Known issue: the end-to-end gateway benchmark no longer completes.** Since
-per-tenant quotas were added, `bench/bench_gateway.py` runs as a demo `pro`
-tenant (300 requests per window, 16 in flight). The concurrency-16 run (640
-requests) and the concurrency-64 run (2,560 requests) get HTTP 429s and fail.
-So `./bench/run_all.sh` prints the redaction, limiter and concurrency-4 gateway
-figures, then exits 1 with `BENCHMARKS FAILED TO RUN`. The two gateway rows
-below predate the quotas and cannot be re-measured with it as it stands.
+The end-to-end gateway benchmark measures throughput, not admission control.
+`bench/bench_gateway.py` runs as its own tenant whose token, request and
+concurrency quotas sit far above the load it generates. Every limit is still
+checked on every request, but none refuses. `./bench/run_all.sh` runs the
+redaction, limiter and concurrency 4 / 16 / 64 gateway benchmarks and exits 0.
+It exits 1 with `BENCHMARKS FAILED TO RUN` only if one of them fails to run. It
+leaves no database behind. The two gateway rows below were measured before
+per-tenant quotas were added.
 
 ### Measured improvements
 

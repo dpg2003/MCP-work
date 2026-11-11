@@ -20,12 +20,13 @@ fi
 
 export GATEWAY_TOKEN_SECRET="${GATEWAY_TOKEN_SECRET:-demo-only-public-secret-never-use-in-production}"  # dev-only, >= 32 bytes
 db="$(mktemp -u /tmp/demo-rate-limit-XXXXXX.sqlite3)"
+tenants="$(mktemp /tmp/demo-tenants-XXXXXX.json)"
 pids=()
 
 cleanup() {
     for pid in "${pids[@]:-}"; do kill "$pid" 2>/dev/null; done
     wait 2>/dev/null
-    rm -f "$db" "$db"-wal "$db"-shm
+    rm -f "$db" "$db"-wal "$db"-shm "$tenants" /tmp/demo-t1.err
 }
 trap cleanup EXIT
 
@@ -105,15 +106,27 @@ echo "   number, IP and version string are near-misses and are preserved)"
 
 # --------------------------------------------------------------------------
 hr "TASK 4 - rate limiting and failover"
+# The gateway admits against each tenant's own quota (RATE_LIMIT_TOKENS does not
+# apply to /v1/complete), so the budget step needs a tenant with a small one:
+# the two built-in demo tenants plus key-budget, a free tenant capped at 150
+# tokens per window.
+cat > "$tenants" <<'JSON'
+{"tenants": [
+  {"tenant_id": "tenant-acme", "tier": "pro", "api_keys": ["key-acme"]},
+  {"tenant_id": "tenant-globex", "tier": "free", "api_keys": ["key-globex"]},
+  {"tenant_id": "tenant-budget", "tier": "free", "api_keys": ["key-budget"],
+   "overrides": {"tokens_per_minute": 150}}
+]}
+JSON
 start "$assessment/task4-rate-limit-router" fake_upstream:app 9100
 start "$assessment/task4-rate-limit-router" app:app 8080 \
-      "RATE_LIMIT_DB=$db" "RATE_LIMIT_TOKENS=150" \
+      "RATE_LIMIT_DB=$db" "TENANTS_FILE=$tenants" \
       "PRIMARY_URL=http://127.0.0.1:9100/primary/v1/complete" \
       "SECONDARY_URL=http://127.0.0.1:9100/secondary/v1/complete"
 wait_for http://127.0.0.1:8080/healthz || exit 1
 
 complete() { post localhost:8080/v1/complete -H 'content-type: application/json' \
-             -H 'X-API-Key: key-acme' -d '{"prompt":"hello","max_tokens":100}'; }
+             -H "X-API-Key: ${1:-key-acme}" -d '{"prompt":"hello","max_tokens":100}'; }
 
 echo "  healthy primary            :"; complete | sed 's/^/    /'
 post localhost:9100/_control/primary -H 'content-type: application/json' -d '{"mode":"429"}' >/dev/null
@@ -123,12 +136,12 @@ post localhost:9100/_control/secondary -H 'content-type: application/json' -d '{
 echo "  both down -> one clean error (no upstream detail):"; complete | sed 's/^/    /'
 post localhost:9100/_control/primary -H 'content-type: application/json' -d '{"mode":"ok"}' >/dev/null
 post localhost:9100/_control/secondary -H 'content-type: application/json' -d '{"mode":"ok"}' >/dev/null
-echo "  exhausting a 150-token budget:"
+echo "  exhausting a 150-token budget (tenant key-budget):"
 for i in 1 2 3 4; do printf '    request %d -> HTTP %s\n' "$i" \
     "$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8080/v1/complete \
-        -H 'content-type: application/json' -H 'X-API-Key: key-acme' \
+        -H 'content-type: application/json' -H 'X-API-Key: key-budget' \
         -d '{"prompt":"hello","max_tokens":100}')"; done
-echo "  the 429 body:"; complete | sed 's/^/    /'
+echo "  the 429 body:"; complete key-budget | sed 's/^/    /'
 echo "  readiness probe:"; curl -s -w '\n' localhost:8080/readyz | sed 's/^/    /'
 
 hr "demo complete - all services stopped"
