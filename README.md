@@ -20,49 +20,100 @@ From a terminal:
 ./setup.sh           # create .venv and install all four projects' dependencies
 ./run_tests.sh       # doc check + config check + all four test suites
 ./tools/demo.sh      # end-to-end walkthrough of all four services
-python tools/assessment/run_matrix.py   # the 54-case assessment scorecard
-./bench/run_all.sh   # optional: reproduce the performance numbers
+.venv/bin/python tools/assessment/run_matrix.py   # the 54-case assessment scorecard
+./bench/run_all.sh   # optional: re-measure the performance numbers (see the known issue below)
 ```
 
-That is the whole setup. `run_tests.sh` runs each suite in its own process,
-continues past a failing project, names the failures, and exits non-zero.
-Extra arguments pass through to pytest (`./run_tests.sh -x -k redact`).
+That is the whole setup. `./setup.sh` needs network access: it installs the
+pinned dependencies from PyPI. `run_tests.sh` stops at once if the
+documentation or configuration check fails; after that it runs each suite in its
+own process, continues past a failing project, names the failures, and exits
+non-zero. Extra arguments pass through to every suite's pytest
+(`./run_tests.sh -x`). A filter such as `-k redact` that matches no test in some
+project makes that project's pytest exit with code 5 (no tests ran), which
+`run_tests.sh` reports as a failure: `./run_tests.sh -k redact` runs Task 3's
+matching tests and then prints `FAILED:` for the other three projects.
+
+A full run takes about two minutes (measured: ~125 s). Output:
 
 ```
 ===== documentation coverage =====
-source           228/ 228 (100.0%)  [enforced]
-test support     122/ 122 (100.0%)  [enforced]
-test functions   331/ 331 (100.0%)  [enforced]
+source           236/ 236 (100.0%)  [enforced]
+test support     143/ 143 (100.0%)  [enforced]
+test functions   380/ 380 (100.0%)  [enforced]
+
 documentation check passed
-===== task1-mcp-server =====        54 passed
-===== task2-security-gateway =====  84 passed
-===== task3-pii-redaction-gateway = 271 passed
-===== task4-rate-limit-router ===== 175 passed
+source            51/  51 (100.0%)  [enforced]
+test support       0/   0 (100.0%)  [enforced]
+test functions     0/   0 (100.0%)  [enforced]
+
+documentation check passed
+
+===== editor / MCP configuration =====
+configuration check passed (7 configs, all paths resolve)
+
+===== task1-mcp-server =====
+......................................................                   [100%]
+54 passed in 53.18s
+
+===== task2-security-gateway =====
+........................................................................ [ 68%]
+.................................                                        [100%]
+105 passed in 0.64s
+
+===== task3-pii-redaction-gateway =====
+........................................................................ [ 22%]
+........................................................................ [ 45%]
+........................................................................ [ 67%]
+........................................................................ [ 90%]
+...............................                                          [100%]
+319 passed in 5.97s
+
+===== task4-rate-limit-router =====
+........................................................................ [ 34%]
+........................................................................ [ 68%]
+.................................................................        [100%]
+209 passed in 63.25s (0:01:03)
+
 ===== summary =====
 all suites passed
 ```
 
-**584 tests, no network access and no API key required.**
+The first documentation block covers `fde-assessment/`, the second `tools/`.
+
+**687 tests** (54 + 105 + 319 + 209). The tests need no network access and no
+API key; only `./setup.sh` downloads anything.
 
 Separately, [`ASSESSMENT_RESULTS.md`](ASSESSMENT_RESULTS.md) is the assessment
 test-case document filled in by measurement rather than by hand — all **54 of 54
-cases pass**. Regenerate it with `python tools/assessment/run_matrix.py`.
+cases pass**. Regenerate it with `.venv/bin/python tools/assessment/run_matrix.py`
+(the project dependencies must be importable, so a bare `python` without them
+fails with `ModuleNotFoundError`). For a result that does not depend on your
+shell, run `env -u ANTHROPIC_API_KEY LLM_PROVIDER=mock .venv/bin/python
+tools/assessment/run_matrix.py`; otherwise a set `ANTHROPIC_API_KEY` switches
+Task 3's live-server cases to the real provider.
 
 ### Running one project
 
+After `./setup.sh`, activate the shared virtualenv, then work inside a project:
+
 ```bash
+source .venv/bin/activate
 cd fde-assessment/task1-mcp-server
-pip install -r requirements.txt
-python server.py          # run it
+python server.py          # run it (speaks MCP on stdin/stdout; Ctrl-D to stop)
 pytest                    # test it
 ```
 
-| Project | Run command | Tests |
+Without the virtualenv active, `python`, `uvicorn` and `pytest` resolve to
+whatever is on your `PATH`, which may lack the dependencies. Each project's
+README also shows a standalone setup from its own `requirements.txt`.
+
+| Project | Run command (from the project folder, venv active) | Tests |
 | --- | --- | --- |
 | `task1-mcp-server` | `python server.py` | 54 |
-| `task2-security-gateway` | `uvicorn downstream:app --port 9001` + `uvicorn gateway:app --port 9000` | 84 |
-| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 271 |
-| `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 175 |
+| `task2-security-gateway` | `uvicorn downstream:app --port 9001` + `GATEWAY_TOKEN_SECRET=<at least 32 bytes> uvicorn gateway:app --port 9000` (no default secret; see [its README](fde-assessment/task2-security-gateway/README.md#run-it)) | 105 |
+| `task3-pii-redaction-gateway` | `uvicorn app:app --port 8000` | 319 |
+| `task4-rate-limit-router` | `uvicorn fake_upstream:app --port 9100` + `uvicorn app:app --port 8080` | 209 |
 
 ---
 
@@ -148,8 +199,9 @@ response.
 
 - `redactor.StreamRedactor.feed(chunk)` — absorb a chunk, return the text that
   is now safe to emit.
-- `redactor.StreamRedactor.close()` — flush the held tail, redacted. Never
-  dropped, never emitted raw.
+- `redactor.StreamRedactor.close()` — flush the held tail through the same
+  redaction. Never dropped. A fragment that never completed a pattern (a stream
+  ending at `4111 1111 1111`) is not a match and is flushed unchanged.
 - `redactor.StreamRedactor._settled_limit()` — computes how much is safe to
   emit: the start of the trailing fragment that could still become PII, floored
   by `len(buffer) - max_hold`.
@@ -261,35 +313,48 @@ Where each requirement from the assessment brief is implemented and tested.
 ## Performance and production readiness
 
 Every change below was driven by a profile or a measurement, and every one is
-guarded by a test that fails if it is reverted. Reproduce the numbers with
+guarded by a test that fails if it is reverted. Re-measure the numbers with
 `./bench/run_all.sh`.
+
+**Known issue: the end-to-end gateway benchmark no longer completes.** Since
+per-tenant quotas were added, `bench/bench_gateway.py` runs as a demo `pro`
+tenant (300 requests per window, 16 in flight). The concurrency-16 run (640
+requests) and the concurrency-64 run (2,560 requests) get HTTP 429s and fail.
+So `./bench/run_all.sh` prints the redaction, limiter and concurrency-4 gateway
+figures, then exits 1 with `BENCHMARKS FAILED TO RUN`. The two gateway rows
+below predate the quotas and cannot be re-measured with it as it stands.
 
 ### Measured improvements
 
 | What | Before | After |
 | --- | --- | --- |
 | Redaction, digit-heavy content | 0.43 MB/s | **~5 MB/s** |
-| Redaction, fine-grained chunks | 0.01 MB/s | **~0.25 MB/s** |
+| Redaction, fine-grained chunks | 0.01 MB/s | **~0.3 MB/s** |
 | Redaction, ordinary prose | 4.94 MB/s | **7.72 MB/s** |
 | Redaction, PII-dense text | 1.27 MB/s | **2.11 MB/s** |
 | Rate limiter admissions | 7,080 ops/s | **18,351 ops/s** |
 | Gateway throughput (concurrency 64) | 647 req/s | **1,956 req/s** |
 | Gateway p50 / p99 latency | 95 / 152 ms | **17 / 42 ms** |
 
-> A note on these numbers: this machine drifts. Re-measuring an unchanged commit
-> hours later moved throughput by ~30%, so absolute figures are only meaningful
-> against a same-session baseline. The prose and PII-dense rows above are a
-> same-session A/B; the rest were taken across sessions and should be read as
-> orders of magnitude, not precise ratios. The durable evidence is in the
-> property tests, which assert *algorithmic* behaviour and do not depend on the
-> box at all.
+> A note on these numbers: every figure is machine-dependent, and this machine
+> drifts. Re-measuring an unchanged commit hours later moved throughput by ~30%,
+> so absolute figures are only meaningful against a same-session baseline. The
+> prose and PII-dense rows above are a same-session A/B; the rest were taken
+> across sessions and should be read as orders of magnitude, not precise
+> ratios. The fine-grained row, for example, has measured 0.31, ~0.25 and
+> 0.39 MB/s in different sessions. The durable evidence is in the property
+> tests, which assert *algorithmic* behaviour and do not depend on the box at
+> all.
 
 **Task 3 — a quadratic regex.** `find_matches` was 94% of stream time, and the
 culprit was the *email* pattern, not the card pattern: its local-part class
 includes digits, so on a long digit run the engine consumed the whole run at
 every start position then backtracked one character at a time hunting an `@`
 that was not there. Fixed with a content gate that selects the narrowest pattern
-that can still match, which is provably result-preserving.
+that can still match. That is result-preserving for ASCII digits only: the
+probe is `[0-9]` while the patterns use `\d`, so an SSN or card written only in
+non-ASCII digits (full-width `１２３-４５-６７８９`) is not redacted. See the
+Task 3 README.
 
 **Task 3 — a backtracking hold-back scan.** Once the quadratic email path was
 gone, `PARTIAL.search` — which decides how much text to hold back — became the
@@ -317,9 +382,12 @@ improves with concurrency rather than collapsing.
   downstream blip cannot trigger restarts; readiness checks the database and
   returns 503 to leave rotation.
 - **Graceful shutdown** drains in-flight admission work.
-- **Correlation ids** on every service. A streamed response commits its status
-  with the first byte, so the request id is the only thing a user can quote when
-  a stream fails — it is echoed in the header and stamped on the failure log.
+- **Correlation ids** on the Task 3 and Task 4 HTTP gateways: an `X-Request-Id`
+  header (Task 3 honours a caller-supplied one) and a `request_id` in every
+  Task 4 error body. Task 2's gateway has none beyond the JSON-RPC `id`. A
+  streamed response commits its status with the first byte, so the request id
+  is the only thing a user can quote when a stream fails — Task 3 echoes it in
+  the header and stamps it on the failure log.
 
 ### How performance is tested
 
@@ -332,12 +400,14 @@ holds on any machine:
 - the event loop keeps ticking through a 300 ms database stall;
 - batching actually occurs, and never changes an admission decision.
 
-Three optimisations touch correctness-critical code, so each is proved equivalent
-to the unoptimised path against a randomised oracle: **14,000+** inputs for the
-redaction patterns (with an independent Luhn implementation, so oracle and
-subject share no code), **25,000+** for the possessive hold-back scan, and **500**
-randomised batches for admission. Reverting the redaction optimisation fails 7 of
-its 10 property tests, including a measured 179x slowdown against an 8x threshold.
+Three optimisations touch correctness-critical code, so each is checked against
+the unoptimised path with a randomised oracle: **19,000** randomised inputs for
+the redaction patterns (with an independent Luhn implementation, so oracle and
+subject share no code; ASCII digits only, see the Task 3 limitation above),
+**25,000+** for the possessive hold-back scan, and **500** randomised batches for
+admission. With the redaction content gate reverted, 7 of the 11 tests in
+`test_performance_properties.py` failed in a measured run, including 8x the
+input costing 58–68x the time against a 20x ceiling.
 
 ### Editor and MCP configuration
 
@@ -406,13 +476,19 @@ The new tests assert **costs**, not mechanisms:
 | `test_the_limiter_applies_each_tenants_own_token_budget` | per-tenant | one global limit |
 
 **On coverage exclusions.** The one that mattered is gone: no feature path is
-excluded from measurement any more. Eight remain, and they are a different
-category — three `if __name__ == "__main__"` entry points, three shutdown/
-cancellation races in the admission worker, one unreachable ordering branch,
-and one attribute passthrough. They are listed here rather than left for
-someone to find, because "it is only defensive" is exactly the reasoning that
-let a whole provider integration go untested. If one of those ever guards real
-behaviour, it needs a test, not a comment.
+excluded from measurement any more. Ten `# pragma: no cover` markers remain in
+the shipped source under `fde-assessment/`, and they are a different category —
+three `if __name__ == "__main__"` entry points (Task 2 `tokens.py`, Task 3 and
+Task 4 `app.py`), four shutdown/cancellation paths in Task 4's admission worker
+(`admission.py`), one unreachable ordering branch (Task 3 `redactor.py`), one
+attribute passthrough (Task 1 `stdio_guard.py`), and one defensive catch-all
+(Task 1 `server.py`, which turns an unexpected exception into a bare `-32603`).
+They are listed here rather than left for someone to find, because "it is only
+defensive" is exactly the reasoning that let a whole provider integration go
+untested. If one of those ever guards real behaviour, it needs a test, not a
+comment — and the `-32603` catch-all arguably does: no test drives it. (Test
+and tooling code carries four more: one in a Task 1 test, one in the root
+`conftest.py`, two in `tools/assessment/_harness.py`.)
 
 ---
 
@@ -481,4 +557,7 @@ Each is documented in the relevant task README:
   multi-byte character; Task 1 validates `reason` by character count.
 - **No internal detail reaches a client.** Tasks 2, 3 and 4 each plant a stack
   trace, an internal hostname and a credential fragment in an upstream failure,
-  and assert none of it appears in the response.
+  and assert none of it appears in the response. One exception, by design: Task
+  2 relays a downstream response below HTTP 400 verbatim, so a JSON-RPC `error`
+  object the downstream returns with HTTP 200 reaches the client unchanged,
+  `message` and `data` included.

@@ -57,12 +57,14 @@ logger = logging.getLogger("fde.gateway")
 #   * "notadmin_reset"   -> NOT privileged (it does not start with the prefix)
 #   * "Admin_Reset"      -> NOT privileged, and therefore reachable by a viewer
 #
-# The case-sensitive choice is deliberate and safe *because* the downstream
-# tool namespace is case-sensitive too: "Admin_Reset" is not the name of any
-# real tool, so letting it through gets a -32601 from downstream rather than
-# privileged access. A case-insensitive check would instead be a footgun —
-# it would block a legitimately-named tool like "Administrative_notes".
-# See ``_is_privileged`` and the README for the full argument.
+# The case-sensitive choice is deliberate, and safe only under two conditions
+# the gateway itself cannot check: every privileged downstream tool is named
+# with the exact lowercase "admin_" prefix, and the downstream server matches
+# tool names exactly (case-sensitively). Then "Admin_Reset" is not the name of
+# any real tool, so letting it through gets a -32601 from downstream rather
+# than privileged access. If either condition breaks -- a privileged tool named
+# "Admin_reset" or "reset_key", or a downstream that folds case -- a viewer can
+# reach it. See ``_is_privileged`` and the README for the full argument.
 ADMIN_TOOL_PREFIX = "admin_"
 
 REQUIRE_AUTH_FOR_LIST = False

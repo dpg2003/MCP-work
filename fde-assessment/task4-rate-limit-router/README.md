@@ -38,16 +38,32 @@ See the [root README](../../README.md) for the per-function reference.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# terminal 1 — fake primary + secondary model endpoints
+# terminal 1 (this one) — fake primary + secondary model endpoints
 uvicorn fake_upstream:app --port 9100
 
 # terminal 2 — the gateway
+source .venv/bin/activate
 uvicorn app:app --port 8080
 ```
 
-Environment: `RATE_LIMIT_DB` (default `rate_limit.sqlite3`), `RATE_LIMIT_TOKENS`
-(50000), `RATE_LIMIT_WINDOW_SECONDS` (60), `PROVIDER_TIMEOUT_MS` (3000),
-`PRIMARY_URL`, `SECONDARY_URL`.
+Already ran `../../setup.sh`? Use `source ../../.venv/bin/activate` in each
+terminal instead of creating a project venv.
+
+Environment:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `RATE_LIMIT_DB` | `rate_limit.sqlite3` | SQLite file, relative to the working directory |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Sliding-window length |
+| `TENANTS_FILE` | unset | Tenant/quota JSON (see below); unset uses the demo tenants and logs a warning |
+| `PROVIDER_TIMEOUT_MS` | `3000` | Per-attempt provider deadline |
+| `PRIMARY_URL` / `SECONDARY_URL` | `http://127.0.0.1:9100/{primary,secondary}/v1/complete` | Provider endpoints |
+| `PROVIDER_MAX_CONNECTIONS` / `PROVIDER_MAX_KEEPALIVE` | `100` / `20` | Provider connection pool |
+| `RATE_LIMIT_TOKENS` | `50000` | The limiter's fallback token limit. The HTTP gateway always applies the tenant's own quota instead, so this does **not** change what `/v1/complete` admits; quotas come from `TENANTS_FILE`. |
+
+The demo tenants are `key-acme` (tier `pro`: 50,000 tokens and 300 requests per
+window, 16 in flight) and `key-globex` (tier `free`: 10,000 tokens, 60 requests,
+4 in flight).
 
 ```bash
 curl -sX POST localhost:8080/v1/complete \
@@ -56,9 +72,9 @@ curl -sX POST localhost:8080/v1/complete \
 ```
 
 ```json
-{"request_id":"req_7bcb9fdf73944962","text":"[primary] hello","provider":"primary",
- "failed_over":false,
- "usage":{"estimated_tokens":102,"actual_tokens":21,"tenant_window_tokens":21,"limit_tokens":150}}
+{"request_id":"req_c8257cf06ef841cc","text":"[primary] hello","provider":"primary","failed_over":false,
+ "tenant":{"id":"tenant-acme","tier":"pro"},
+ "usage":{"estimated_tokens":102,"actual_tokens":21,"tenant_window_tokens":21,"limit_tokens":50000,"limit_requests":300}}
 ```
 
 Drive the providers to exercise failover:
@@ -71,20 +87,36 @@ curl -sX POST localhost:9100/_control/primary -d '{"mode":"hang"}' -H 'content-t
 # next request -> times out at PROVIDER_TIMEOUT_MS, then {"provider":"secondary", ...}
 
 curl -sX POST localhost:9100/_control/secondary -d '{"mode":"500"}' -H 'content-type: application/json'
-# both down ->
+# both down (the timed-out primary is not retried; the 500 is retried once) ->
 # {"error":{"type":"upstream_unavailable",
 #           "message":"No model provider was able to serve this request",
-#           "request_id":"req_ffc26b64...",
-#           "details":{"attempts":["primary:timeout","secondary:unavailable"]}}}
+#           "request_id":"req_bccee370...",
+#           "details":{"attempts":["primary:timeout","secondary:unavailable","secondary:unavailable"]}}}
+
+# back to normal
+curl -sX POST localhost:9100/_control/primary -d '{"mode":"ok"}' -H 'content-type: application/json'
+curl -sX POST localhost:9100/_control/secondary -d '{"mode":"ok"}' -H 'content-type: application/json'
 ```
 
-Over the budget:
+Over the budget — one request whose estimate exceeds the `free` tier's 10,000
+tokens:
+
+```bash
+curl -sX POST localhost:8080/v1/complete \
+     -H 'content-type: application/json' -H 'X-API-Key: key-globex' \
+     -d '{"prompt":"hello","max_tokens":20000}'
+```
 
 ```json
 {"error":{"type":"rate_limit_exceeded","message":"Rate limit exceeded",
-          "request_id":"req_db66...","details":{"limit_tokens":150,"window_seconds":60.0,
-          "used_tokens":63,"requested_tokens":102,"retry_after_seconds":59.93}}}
+          "request_id":"req_6379dbfa...","details":{"limit":"tokens","tier":"free",
+          "limit_tokens":10000,"limit_requests":60,"window_seconds":60.0,
+          "used_tokens":0,"used_requests":0,"requested_tokens":20002,"retry_after_seconds":0.0}}}
 ```
+
+HTTP 429 (shown from a fresh database; `used_*` and `retry_after_seconds`
+reflect earlier usage in the window). `max_tokens` above 32,000 is an
+`invalid_request` (HTTP 400) instead.
 
 ## Run the tests
 
@@ -93,7 +125,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-67 tests. The window-eviction tests use an injectable clock rather than
+209 tests. The window-eviction tests use an injectable clock rather than
 `sleep(60)`. The timeout tests run against a real uvicorn server on a real
 socket — httpx's `ASGITransport` awaits the app directly, so there is no socket
 for a read timeout to fire on, and a timeout test through it would prove

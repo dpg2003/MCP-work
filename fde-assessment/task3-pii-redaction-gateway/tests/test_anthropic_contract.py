@@ -4,8 +4,8 @@ Why this file exists
 --------------------
 Every other test in this project drives a mock provider. ``AnthropicProvider``
 -- the only class that runs in production -- was marked ``# pragma: no cover``
-and had never been executed, so "253 tests passing" said nothing about the
-integration an operator actually uses.
+and had never been executed, so the "253 tests passing" of that time said
+nothing about the integration an operator actually uses.
 
 These tests drive ``AnthropicProvider.stream`` itself. The SDK client is
 injected, but nothing else is stubbed: the method's own ``async with``, its

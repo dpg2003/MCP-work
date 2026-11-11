@@ -14,6 +14,11 @@ pattern is split across chunk boundaries, and without buffering the response.
 | `tests/conftest.py` | PII samples, chunking helpers, and a live-server context manager |
 | `tests/test_redactor.py` | Split-point coverage, false positives, unicode, memory bounds, the differential oracle |
 | `tests/test_gateway_stream.py` | HTTP streaming, TTFT, upstream failures |
+| `tests/test_pattern_equivalence.py` | The narrowed match path against the full alternation |
+| `tests/test_partial_equivalence.py` | The possessive hold-back regex against its backtracking form |
+| `tests/test_performance_properties.py` | Linear scaling and bounded buffers, without absolute timings |
+| `tests/test_anthropic_contract.py` | The real `AnthropicProvider.stream` against a stub of the SDK surface |
+| `tests/test_observability.py` | Request ids on responses and on the failure log; the prompt-size cap |
 
 See the [root README](../../README.md) for the per-function reference.
 
@@ -23,8 +28,14 @@ See the [root README](../../README.md) for the per-function reference.
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-uvicorn app:app --port 8000            # LLM_PROVIDER defaults to "mock"
+uvicorn app:app --port 8000   # mock upstream unless ANTHROPIC_API_KEY is set
 ```
+
+With `LLM_PROVIDER` unset, the provider follows the environment: a set
+`ANTHROPIC_API_KEY` selects the real Anthropic provider, otherwise the scripted
+mock is used and a warning is logged. Set `LLM_PROVIDER=mock` to force the mock.
+Already ran `../../setup.sh`? Use `source ../../.venv/bin/activate` instead of
+the first two lines.
 
 ```bash
 curl -sN -X POST localhost:8000/v1/generate \
@@ -60,7 +71,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-170 tests, no network and no API key required.
+319 tests, no network and no API key required.
 
 ## How the sliding buffer works
 
@@ -86,16 +97,27 @@ For each chunk:
    correctly, but only settled matches are substituted.
 4. Emit `buffer[:emit_limit]`; keep the rest.
 
-`close()` sets `emit_limit = len(buffer)`: the tail is redacted and flushed. It
-is never dropped, and never emitted raw — including when the upstream stream
-died mid-PII, which the tests cover explicitly.
+`close()` sets `emit_limit = len(buffer)`: the tail goes through the same
+redaction and is flushed. It is never dropped. But redaction only replaces
+*complete* matches, so a fragment that never became one is flushed as-is. That
+happens when the stream ends, or the upstream dies, partway through a token:
+`"Her card is 4111 1111 1111"` and `"SSN 123-45-67"` reach the client
+unchanged, followed by the error sentinel if the upstream failed.
+`tests/test_redactor.py` asserts this on purpose
+(`test_stream_ending_with_a_truncated_pattern_flushes_it_unmodified`). A
+fragment that does not complete a pattern is not PII by these patterns, but it
+can be the leading digits of a real card or SSN.
 
 ### Guarantees
 
 - **Split width.** Any PII token up to `max_hold` characters (default **256**)
   is redacted no matter how it is split — including one character per chunk.
   Tests assert this at every split point of every secret, and character by
-  character.
+  character. SSNs and cards are always within that (cards are at most 23
+  characters). Emails are not: the email pattern has no length cap, so an
+  address longer than `max_hold` has its leading characters emitted before it
+  completes. A 300-character local part streamed one character at a time
+  leaked its first 54 characters when measured.
 - **Memory.** `len(buffer) <= max_hold + len(largest chunk)`, independent of
   stream length. Asserted two ways: a buffer high-water-mark invariant over a
   1 MB stream (including an adversarial all-digit flood, which would grow an
@@ -165,9 +187,13 @@ character at a time looking for an `@` that was not there — quadratic.
 | Workload | Before | After |
 | --- | --- | --- |
 | Digit-heavy, 70-char chunks | 0.43 MB/s | **5.24 MB/s** |
-| Prose, 1-char chunks | 0.01 MB/s | **0.31 MB/s** |
+| Prose, 1-char chunks | 0.01 MB/s | **~0.3 MB/s** |
 | Prose, 70-char chunks | 4.66 MB/s | **6.53 MB/s** |
 | Single scan of a 326-char digit buffer | 161 µs | **6 µs** |
+
+All throughput figures are machine-dependent; compare them only within one
+session. The 1-char row, for example, has measured 0.31, ~0.25 and 0.39 MB/s
+in different sessions. `../../bench/run_all.sh` re-measures them.
 
 A second round then addressed the hold-back scan, which had become the
 bottleneck once the quadratic path was gone. `PARTIAL` is anchored to the end of
@@ -187,26 +213,42 @@ original backtracking one over 25,000+ randomised inputs, every prefix of every
 test secret, and buffers longer than the hold-back window.
 
 The fix is a *content gate*, not a rewritten regex: an email cannot match text
-containing no `@`, and neither SSNs nor cards can match text containing no digit,
-so `_pattern_for` selects the narrowest variant that can still match. Dropping an
-alternative that provably cannot match anywhere cannot change the result.
+containing no `@`, and neither SSNs nor cards can match text containing no
+digit, so `_pattern_for` selects the narrowest variant that can still match.
+For ASCII digits, dropping an alternative that cannot match anywhere cannot
+change the result.
 
-A possessive-quantifier rewrite was considered and rejected: it silently breaks
-a real case. In `"4111111111111111 2222"` the engine must backtrack to find the
-16-digit card, and `{12,18}+` would take 19 digits, fail the trailing `\b`, and
-match nothing.
+**Limitation: non-ASCII digits.** The digit probe is ASCII `[0-9]`, but the SSN
+and card patterns use `\d`, which also matches full-width, Arabic-Indic and
+other Unicode digits. So text whose *only* digits are non-ASCII skips the
+numeric scan: `SSN １２３-４５-６７８９` matches the full pattern but is not
+redacted by `find_matches`. It is redacted only if an ASCII digit happens to be
+in the same buffer. The equivalence tests below use ASCII digits only, so they
+do not cover this case.
+
+A possessive-quantifier rewrite was considered and rejected while the card
+pattern was still `\b\d(?:[ -]?\d){12,18}\b`. In `"4111111111111111 2222"` that
+pattern has to backtrack to find the 16-digit card; `{12,18}+` would have taken
+19 digits across the space, failed the trailing `\b`, and matched nothing. The
+current `CARD` uses fixed group sizes (see *Avoiding false positives*), so that
+example no longer applies to it. The content gate is what shipped either way.
 
 **This is an optimisation applied to a security control, so it is held to a
 higher bar than "the other tests still pass."** `tests/test_pattern_equivalence.py`
-compares the narrowed path against the unoptimised full alternation over 14,000+
+compares the narrowed path against the unoptimised full alternation over 19,000
 randomised inputs — random strings, compositions of real PII and near-misses,
-adversarial `@` placements in digit runs, and every card-length boundary — using
+digit runs around the card window, adversarial `@` placements in digit runs, and
+cards glued to random digit groups — plus every card-length boundary, using
 an independent Luhn implementation in the oracle so the two share no code path.
 
 `tests/test_performance_properties.py` guards the algorithmic behaviour without
 depending on absolute timings (throughput numbers belong in `bench/`, where a
-noisy CI box cannot fail a build). Reverting the optimisation fails 7 of its 10
-tests, including a measured 179× slowdown against an 8× threshold.
+noisy CI box cannot fail a build). With the content gate reverted
+(`_pattern_for` always returning the full alternation), 7 of its 11 tests
+failed in a measured run: both mechanism checks; the four linear-scaling checks
+on runs the email pattern can absorb, where 8× the input cost 58–68× the time
+against a 20× ceiling; and the 50,000-digit budget, at 2.64 s against 2.0 s.
+That last margin is the machine-dependent one.
 
 ## Observability
 
@@ -223,9 +265,10 @@ interior position, and character by character. What was **not** covered was the
 only class that runs in production.
 
 `AnthropicProvider.stream` was marked `# pragma: no cover - needs a key` and
-had never executed. Every one of the other tests drove a mock. So "253 tests
-passing" said nothing about the integration an operator actually uses, and the
-guardrail had never been demonstrated against a real provider response.
+had never executed. Every one of the other tests drove a mock. So the "253 tests
+passing" of that time said nothing about the integration an operator actually
+uses, and the guardrail had never been demonstrated against a real provider
+response.
 
 Two changes close that:
 
@@ -235,9 +278,9 @@ Two changes close that:
   error normalisation — against a stub implementing the SDK's streaming
   surface. If a future SDK release changes that shape, these fail, which is the
   point: they are a contract, not a mock of our own code. They also assert the
-  model id and output budget actually sent, sweep delta widths from 1 to 8
-  characters, and check that a mid-stream failure still flushes a *redacted*
-  tail.
+  model id and output budget actually sent, sweep delta widths of 1, 2, 3, 5
+  and 8 characters, and check that a mid-stream failure still flushes a
+  *redacted* tail.
 - **The default follows the environment.** With `LLM_PROVIDER` unset, a present
   `ANTHROPIC_API_KEY` now selects the real provider. Previously the documented
   run command served the scripted fixture even when a key was available, so

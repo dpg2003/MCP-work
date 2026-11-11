@@ -10,15 +10,18 @@ downstream server is never contacted.
 | File | Purpose |
 | --- | --- |
 | `gateway.py` | The proxy: parsing, authorization, forwarding, upstream-error sanitisation. Entry point. |
-| `tokens.py` | HMAC-signed bearer tokens — issue, verify, header parsing. Also a `mint-token` CLI. |
+| `tokens.py` | HMAC-signed bearer tokens — issue, verify, header parsing. Run as a script (`python tokens.py [role] [subject]`) it mints a token. |
 | `downstream.py` | Mock MCP server with a call log and failure injection |
 | `tests/conftest.py` | Wires the gateway to the mock downstream over an in-process ASGI transport |
 | `tests/test_gateway.py` | Policy, auth failures, malformed payloads, batches, downstream failures |
+| `tests/test_hardening.py` | Body-size and batch-size caps |
 | `tests/test_tokens.py` | The token scheme itself |
 
 See the [root README](../../README.md) for the per-function reference.
 
 ## Run it
+
+All commands run from this directory.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -27,13 +30,21 @@ pip install -r requirements.txt
 # generate the signing secret ONCE and copy the output
 python -c 'import secrets; print(secrets.token_urlsafe(32))'
 
-# terminal 1 — the mock downstream MCP server (needs no secret)
+# terminal 1 (this one) — the mock downstream MCP server (needs no secret)
 uvicorn downstream:app --port 9001
 
 # terminal 2 — the gateway
+source .venv/bin/activate
 export GATEWAY_TOKEN_SECRET='<the value generated above>'
 DOWNSTREAM_URL=http://127.0.0.1:9001/mcp uvicorn gateway:app --port 9000
 ```
+
+Already ran `../../setup.sh`? Skip the first two lines and use
+`source ../../.venv/bin/activate` in every terminal instead.
+
+Each new terminal needs the virtualenv activated. Without it, `uvicorn` and
+`python` resolve to whatever is on your `PATH`, which may not have FastAPI or
+httpx installed.
 
 There is no default secret. The gateway refuses to start (uvicorn logs
 `SecretNotConfigured` and `Application startup failed. Exiting.`) unless
@@ -45,6 +56,7 @@ reach another.
 Mint tokens with the built-in CLI, in a third terminal:
 
 ```bash
+source .venv/bin/activate
 export GATEWAY_TOKEN_SECRET='<the same value as terminal 2>'
 python tokens.py admin   root@example.com
 python tokens.py viewer  reader@example.com
@@ -70,7 +82,7 @@ pip install -r requirements.txt
 pytest
 ```
 
-72 tests. The gateway's httpx client is injectable, so the suite mounts the
+105 tests. The gateway's httpx client is injectable, so the suite mounts the
 downstream FastAPI app straight onto an `ASGITransport` — no ports bound, fully
 deterministic, and the downstream call log stays inspectable, which is how
 *"the downstream server was never called"* is asserted rather than assumed.
@@ -135,13 +147,16 @@ error — which is what an MCP client is actually equipped to parse.
   `name.startswith("admin_")`. So:
   - `notadmin_reset` is **not** privileged. It does not *start with* the prefix;
     a substring check here would be the bug, not the fix.
-  - `Admin_Reset` is **not** privileged, and this is safe: the downstream tool
-    namespace is itself case-sensitive, so `Admin_Reset` is not the name of any
+  - `Admin_Reset` is **not** privileged. With this downstream that is safe: its
+    tool namespace is case-sensitive, so `Admin_Reset` is not the name of any
     real tool and gets a `-32601` from downstream rather than privileged access.
-    A case-insensitive check would instead be a footgun — it would silently
-    block a legitimately-named tool like `Administrative_notes`.
   - ` admin_reset_key` (leading space) is likewise not the prefix and not a real
     tool. Both are covered by tests.
+  - The safety of this rests on two things the gateway cannot check itself:
+    every privileged tool must be named with the exact lowercase `admin_`
+    prefix, and the downstream server must match tool names exactly. A
+    privileged tool named `Admin_reset` or `reset_key`, or a downstream that
+    folds case or trims whitespace, would be reachable by a viewer.
 - **Roles fail closed.** Only the exact strings `admin` and `viewer` are
   accepted. `superadmin`, `ADMIN`, `null`, `1`, and an absent `role` are all
   rejected at token verification — even when the signature is valid. An unknown
@@ -152,12 +167,20 @@ error — which is what an MCP client is actually equipped to parse.
   token is authenticated once per HTTP request (it is a property of the
   connection), but the `admin_` check runs per message — a batch mixing a
   permitted and a blocked call forwards only the permitted one.
-- **Upstream errors are sanitized.** The gateway never includes the downstream
-  response body, the exception string, or the target host in what it returns;
-  only a fixed `reason` enum (`timeout`, `unreachable`, `bad_status`,
-  `invalid_response`). The full detail goes to the gateway's own logs. Tests
-  assert that a planted stack trace, password, and internal hostname all fail to
-  appear in the client-facing response.
+- **Upstream failures are sanitized.** When the downstream call fails — a
+  transport error (timeout, refused connection), an HTTP 4xx/5xx, or a body
+  that is not JSON — the gateway never includes the downstream response body,
+  the exception string, or the target host in what it returns; only a fixed
+  `reason` enum (`timeout`, `unreachable`, `bad_status`, `invalid_response`).
+  The full detail goes to the gateway's own logs. Tests assert that a planted
+  stack trace, password, and internal hostname all fail to appear in the
+  client-facing response.
+- **Successful responses are relayed verbatim — including JSON-RPC errors.**
+  Any downstream response below HTTP 400 with a JSON body is passed through
+  as-is. A JSON-RPC `error` object returned with HTTP 200 therefore reaches the
+  client unchanged, `message` and `data` included (that is how the `-32601
+  Unknown tool: …` above gets through). Sanitising those is the downstream
+  server's job; the gateway does not rewrite them.
 
 ## Production hardening
 

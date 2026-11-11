@@ -5,11 +5,19 @@ Executes all 54 cases against the real implementations -- the MCP server as a
 real subprocess over a real pipe, the HTTP services on real sockets, the timeout
 cases with real wall-clock latency -- and writes a filled-in markdown matrix.
 
-Usage::
+Usage, from the repository root after ``./setup.sh``::
 
-    python tools/assessment/run_matrix.py [output.md]
+    .venv/bin/python tools/assessment/run_matrix.py [output.md]
 
-Default output: ASSESSMENT_RESULTS.md at the repository root.
+It needs the project dependencies (httpx, uvicorn, ...), so run it with the
+virtualenv's interpreter; a bare ``python`` without them fails on import. For
+results that do not depend on the caller's shell, pin the Task 3 provider to
+the mock and hide any API key::
+
+    env -u ANTHROPIC_API_KEY LLM_PROVIDER=mock .venv/bin/python tools/assessment/run_matrix.py
+
+Default output: ASSESSMENT_RESULTS.md at the repository root. Exits 1 if any
+case fails, or if a task records fewer or more cases than the document lists.
 """
 
 from __future__ import annotations
@@ -90,7 +98,7 @@ def main(argv: list[str]) -> int:
         "implementation and filled in automatically.",
         "",
         f"- **Generated:** {started}",
-        "- **Regenerate:** `python tools/assessment/run_matrix.py`",
+        "- **Regenerate:** `.venv/bin/python tools/assessment/run_matrix.py`",
         "- **Scope:** all four tasks, 54 cases — the complete assessment. "
         "(An earlier draft of the source document referenced a fifth task; it was "
         "confirmed not to exist.)",

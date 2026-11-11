@@ -10,11 +10,15 @@ is a build step rather than a claim:
 * **Test support code** -- fixtures, helpers, and any non-``test_`` function in
   a test module -- must also be documented, because those names describe
   plumbing rather than behaviour.
-* **Test functions themselves** are reported but not enforced. A well-named
-  test is its own specification (``test_exactly_the_limit_is_allowed_and_one
-  _more_is_not`` needs no prose), and a docstring that restates the function
-  name is noise. Docstrings are added to the tests whose intent is not obvious
-  from the name alone.
+* **Test functions themselves** (``test_*`` in a test module) must also be
+  documented -- this is enforced too, so an undocumented test fails the check.
+  The bar is that the docstring says something the name does not: why the
+  case matters, where the boundary is, which failure it guards against.
+  The checker can only verify that a docstring exists, not that it adds
+  anything; that part is a review standard.
+
+All three categories are enforced: any gap in any of them makes the check exit
+1 and list the undocumented definitions on stderr.
 
 Dunder methods with no behaviour of their own (``__aiter__``, ``__aenter__``
 and friends implementing a stdlib protocol) are exempt: the protocol is the
@@ -24,9 +28,10 @@ Usage::
 
     python tools/check_docs.py [root]
 
-``root`` defaults to the ``fde-assessment`` directory next to this script, so the
-checker works from any working directory rather than only from the repository
-root.
+``root`` defaults to the repository's ``fde-assessment`` directory, located
+relative to this script, so the checker works from any working directory rather
+than only from the repository root. ``./run_tests.sh`` runs it twice: once on
+``fde-assessment`` and once on ``tools``. It uses only the standard library.
 """
 
 from __future__ import annotations

@@ -23,15 +23,25 @@ See the [root README](../../README.md) for the per-function reference.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python server.py          # serves MCP over stdin/stdout
+python server.py          # serves MCP over stdin/stdout; exits when stdin closes
 ```
+
+Already ran `../../setup.sh`? Use `source ../../.venv/bin/activate` instead of
+the first two lines.
 
 The process speaks newline-delimited JSON-RPC on stdin/stdout and logs to
-stderr. Point any MCP client at it, e.g.:
+stderr. Point any MCP client at it. A client launches the server itself, so give
+it absolute paths to an interpreter that has the dependencies and to
+`server.py`, e.g.:
 
 ```json
-{ "mcpServers": { "fde-customer-ops": { "command": "python", "args": ["server.py"] } } }
+{ "mcpServers": { "fde-customer-ops": {
+    "command": "/ABSOLUTE/PATH/TO/REPO/.venv/bin/python",
+    "args": ["/ABSOLUTE/PATH/TO/REPO/fde-assessment/task1-mcp-server/server.py"] } } }
 ```
+
+Ready-made configs: [`examples/claude_desktop_config.json`](../../examples/claude_desktop_config.json)
+(Claude Desktop) and [`.vscode/mcp.json`](../../.vscode/mcp.json) (VS Code).
 
 ## Run the tests
 

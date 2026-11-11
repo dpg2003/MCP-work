@@ -23,15 +23,23 @@ For each chunk:
    * the start of any match that is still *open* at the buffer end;
    * ``len(buffer) - max_hold`` is a floor, not a ceiling: it caps how much
      can ever be held so a pathological input cannot grow the buffer without
-     bound. It is safe because no recognised PII token exceeds ``max_hold``
-     characters, so any real token lies entirely within the held window.
+     bound. SSNs (11 characters) and cards (at most 23) always fit inside the
+     held window. Emails do not have to: ``EMAIL`` has no length cap, so an
+     address longer than ``max_hold`` streams out with its leading characters
+     unredacted -- a 300-character local part (312-character address)
+     streamed one character at a time leaked its first 54 characters when
+     measured. Only the split-width guarantee below (tokens up to
+     ``max_hold``) holds.
 
 3. Redact every match that ends at or before ``emit_limit`` (matching is done
    against the *whole* buffer, so ``\\b`` and neighbouring context are correct),
    emit ``buffer[:emit_limit]`` with those substitutions, and keep the rest.
 
-On close, ``emit_limit`` becomes ``len(buffer)``: the tail is redacted and
-flushed, never dropped and never emitted raw.
+On close, ``emit_limit`` becomes ``len(buffer)``: the tail goes through the same
+redaction and is flushed, never dropped. A tail that never completed a pattern
+is not PII by these patterns and is flushed as-is -- a stream that stops at
+``"Her card is 4111 1111 1111"`` or ``"SSN 123-45-67"`` emits that fragment
+unchanged. That includes an upstream failure mid-token (see ``redact_stream``).
 
 Guarantees
 ----------
@@ -51,8 +59,10 @@ from collections.abc import AsyncIterator, Iterable
 
 REPLACEMENT = "[REDACTED]"
 
-# Longest token any pattern can produce, and therefore the maximum hold-back.
-# Also the documented split-width guarantee.
+# Maximum hold-back, and therefore the documented split-width guarantee. It
+# covers every SSN and card, and every email up to 256 characters; EMAIL itself
+# has no length cap, so a longer address is not guaranteed (see the module
+# docstring).
 DEFAULT_MAX_HOLD = 256
 
 # --------------------------------------------------------------------------
@@ -109,9 +119,15 @@ _CARD_FIRST_FOUR_GROUPS = re.compile(
 #
 # The fix is a content gate rather than a rewritten regex: an email cannot
 # match text with no "@" in it, and neither SSNs nor cards can match text with
-# no digit in it. Dropping an alternative that provably cannot match anywhere
-# cannot change the result, so ``_pattern_for`` picks the narrowest variant and
-# the quadratic path is simply never entered on numeric text.
+# no ASCII digit in it, so ``_pattern_for`` picks the narrowest variant and the
+# quadratic path is simply never entered on numeric text.
+#
+# LIMITATION: the gate is exact for ASCII digits only. ``_HAS_DIGIT`` probes
+# for ``[0-9]``, but SSN and CARD use ``\d``, which also matches non-ASCII
+# digits (full-width "１２３-４５-６７８９", Arabic-Indic, ...). Text whose only
+# digits are non-ASCII therefore skips the numeric scan that PATTERN would have
+# run, and such an SSN or card is redacted only if an ASCII digit happens to
+# share the buffer. The equivalence tests use ASCII digits only.
 PATTERN = re.compile(
     rf"(?P<email>{EMAIL})|(?P<ssn>{SSN})|(?P<card>{CARD})",
 )
@@ -127,9 +143,13 @@ _NON_DIGITS = re.compile(r"[^0-9]").sub
 def _pattern_for(text: str) -> re.Pattern[str] | None:
     """Narrowest pattern that can still match ``text``, or ``None`` for no match.
 
-    Purely an optimisation: every branch returns a pattern whose result on
-    ``text`` is identical to :data:`PATTERN`'s, because the alternatives it
-    omits cannot match text that lacks their mandatory characters.
+    An optimisation: for text whose digits are ASCII, every branch returns a
+    pattern whose result on ``text`` is identical to :data:`PATTERN`'s,
+    because the alternatives it omits cannot match text that lacks their
+    mandatory characters. Not for non-ASCII digits: the probe is ``[0-9]``
+    while the patterns use ``\\d``, so text whose only digits are non-ASCII
+    gets no numeric scan here although :data:`PATTERN` would find an SSN or
+    card in it.
     """
     has_at = "@" in text
     has_digit = _HAS_DIGIT(text) is not None
@@ -149,7 +169,7 @@ def _pattern_for(text: str) -> re.Pattern[str] | None:
 #
 # It is safe *because* of the ``\Z`` anchor: the alternatives are built so the
 # maximal consumption is the only one that can reach the end of the string, so
-# no match is lost. Verified against the backtracking form over 60,000+
+# no match is lost. Verified against the backtracking form over 25,000+
 # randomised inputs in tests/test_partial_equivalence.py. Measured: 38.6us ->
 # 17.1us per search on a representative buffer.
 PARTIAL = re.compile(
@@ -203,8 +223,9 @@ def find_matches(text: str) -> Iterable[re.Match[str]]:
     it (``"1234 4111 1111 1111 1111"``) is still found. ``finditer`` cannot do
     this: it resumes at the end of the regex match, before Luhn has run.
 
-    Results are identical to running the same scan with :data:`PATTERN`; see
-    :func:`_pattern_for` for why narrowing is safe.
+    For text whose digits are ASCII, results are identical to running the same
+    scan with :data:`PATTERN`; see :func:`_pattern_for` for why narrowing is
+    safe there, and for the non-ASCII-digit case where it is not.
     """
     pattern = _pattern_for(text)
     if pattern is None:
@@ -299,7 +320,12 @@ class StreamRedactor:
         return self._drain(self._settled_limit())
 
     def close(self) -> str:
-        """Flush the tail. Anything held back is redacted, then emitted."""
+        """Flush the tail. Anything held back is redacted, then emitted.
+
+        "Redacted" means matched against the full patterns: a held fragment
+        that never completed one (``"4111 1111 1111"``, ``"123-45-67"``) is
+        emitted unchanged.
+        """
         if self._closed:
             return ""
         self._closed = True
@@ -312,13 +338,14 @@ class StreamRedactor:
         The smaller of two bounds: the start of the trailing fragment that
         could still grow into a match, and a hard floor of
         ``len(buffer) - max_hold`` that caps the hold-back. The floor is safe
-        because no recognised token is longer than ``max_hold``, so a real
-        token always lies entirely within the held window.
+        for every SSN and card and for emails up to ``max_hold`` characters;
+        an email longer than that has its leading characters emitted before
+        it completes (``EMAIL`` has no length cap).
         """
         buffer = self._buffer
-        # Floor: never hold more than max_hold characters. Safe because no
-        # recognised token is longer than that, so a real token always lies
-        # entirely inside the held window.
+        # Floor: never hold more than max_hold characters. A token that fits
+        # in max_hold always lies entirely inside the held window; only an
+        # email longer than that (EMAIL has no length cap) can be cut by it.
         limit = max(0, len(buffer) - self.max_hold)
         limit = max(limit, _partial_prefix_start(buffer, self.max_hold))
         return min(limit, len(buffer))

@@ -1,7 +1,9 @@
 # Testing this yourself
 
 Everything below needs **VS Code and nothing else**. No local Python, no manual
-dependency install, no API keys, no network access.
+dependency install, no API keys. The tests themselves need no network access,
+but setup does: the first container build pulls the base image, and
+`./setup.sh` installs the pinned Python packages from PyPI.
 
 ---
 
@@ -12,7 +14,7 @@ dependency install, no API keys, no network access.
 3. When prompted, choose **Reopen in Container** (or Command Palette →
    *Dev Containers: Reopen in Container*).
 
-The container builds Python 3.11 and runs `./setup.sh` for you. When it
+The container uses a Python 3.11 image and runs `./setup.sh` for you. When it
 finishes, everything below works.
 
 > **Not using containers?** You need Python 3.11+ on your machine; run
@@ -26,17 +28,18 @@ finishes, everything below works.
 
 | Task | What it does |
 | --- | --- |
-| **Tests: ALL** | Doc check + config check + all four suites (~2 min) |
-| Tests: Task 1 — MCP server | 54 tests |
-| Tests: Task 2 — security gateway | 84 tests |
-| Tests: Task 3 — PII redaction | 253 tests |
-| Tests: Task 4 — rate limit router | 100 tests |
-| Benchmarks: run all | Prints throughput and latency numbers |
-| Docs: coverage check | Enforces 100% documentation on source |
+| **Tests: ALL (doc check + 4 suites)** | Doc check + config check + all four suites, 687 tests (~2 min) |
+| Tests: Task 1 - MCP server | 54 tests (~55 s) |
+| Tests: Task 2 - security gateway | 105 tests |
+| Tests: Task 3 - PII redaction | 319 tests |
+| Tests: Task 4 - rate limit router | 209 tests (~65 s) |
+| Benchmarks: run all | Prints throughput and latency numbers. Currently exits 1 after the concurrency-4 gateway run; see the known issue in the root README |
+| Docs: coverage check | Enforces 100% docstring coverage on source, test support and test functions in `fde-assessment/` |
 | **Assessment: run the 54-case matrix** | Runs every case from the assessment test-case document and writes `ASSESSMENT_RESULTS.md` |
 
-*Tests: ALL* is the default test task, so <kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>
-→ *Tasks: Run Test Task* runs it directly.
+*Tests: ALL (doc check + 4 suites)* is the default test task, so
+<kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> → *Tasks: Run Test Task* runs
+it directly.
 
 **Testing panel.** VS Code's test explorer runs one project at a time (the four
 cannot share a pytest process — see the root README). It is pointed at Task 4 by
@@ -50,14 +53,21 @@ another, or just use the tasks above, which run each in its own process.
 **Tasks: Run Task → Assessment: run the 54-case matrix**, or:
 
 ```bash
-python tools/assessment/run_matrix.py
+.venv/bin/python tools/assessment/run_matrix.py
 ```
+
+Use the virtualenv's interpreter: the matrix imports the project dependencies,
+so a bare `python` without them fails with `ModuleNotFoundError`. A set
+`ANTHROPIC_API_KEY` in your shell switches Task 3's live-server cases to the
+real provider; for a reproducible run use
+`env -u ANTHROPIC_API_KEY LLM_PROVIDER=mock .venv/bin/python tools/assessment/run_matrix.py`.
 
 This executes all 54 cases from the assessment test-case document against the
 real implementations — the MCP server as a subprocess over a real pipe, the HTTP
 services on real sockets, the timeout cases with real wall-clock latency — and
 writes the filled-in table to [`ASSESSMENT_RESULTS.md`](ASSESSMENT_RESULTS.md).
-It exits non-zero if any case fails, so it is safe to run in CI.
+It takes about 20 seconds and exits non-zero if any case fails or a case goes
+missing, so it is safe to run in CI.
 
 Current result: **54 / 54 passed**.
 
@@ -65,9 +75,10 @@ Current result: **54 / 54 passed**.
 
 **Tasks: Run Task → Demo: end-to-end walkthrough of all four.**
 
-One command starts every service on its own port, exercises the behaviour each
-task is assessed on, prints the result, and shuts everything down. Nothing is
-left running. You should see:
+One command (`./tools/demo.sh`, about a minute) starts every service on its own
+port, exercises the behaviour each task is assessed on, prints the result, and
+shuts everything down. Nothing is left running. It uses ports 9000, 9001, 8000,
+8080 and 9100, so stop any run tasks first. You should see:
 
 - **Task 1** — a valid call, a `-32602` on a malformed id, a `-32000` on an
   unknown customer, and a `-32700` on a garbage frame; every stdout line valid
@@ -78,9 +89,12 @@ left running. You should see:
 - **Task 3** — an email, SSN and card redacted mid-stream even though the mock
   upstream splits each across chunk boundaries, with the ticket number, IP
   address and version string preserved.
-- **Task 4** — a healthy call, a 429 triggering failover, both providers down
-  yielding one sanitized error, and a token budget being exhausted into a clean
-  429.
+- **Task 4** — a healthy call, a 429 triggering failover, and both providers
+  down yielding one sanitized error. **Known issue:** the final "exhausting a
+  150-token budget" step no longer shows a 429. The demo sets
+  `RATE_LIMIT_TOKENS=150`, but the gateway now applies the tenant's own quota
+  (50,000 tokens for the demo `key-acme` tenant), so all four requests return
+  HTTP 200 and the "429 body" printed is a normal success response.
 
 ---
 
@@ -91,7 +105,7 @@ launch configuration per service, with breakpoints working throughout:
 
 - Task 1: MCP server (stdio)
 - Task 2: gateway + downstream *(compound — starts both)*
-- Task 3: PII redaction gateway
+- Task 3: PII redaction gateway (:8000)
 - Task 4: router + providers *(compound — starts both)*
 
 Or start them without the debugger from **Tasks: Run Task → Run: …**. Ports are
@@ -134,7 +148,7 @@ With the run tasks started:
 ```bash
 # Task 2 - mint a token, then get blocked
 TOKEN=$(cd fde-assessment/task2-security-gateway && \
-        GATEWAY_TOKEN_SECRET=dev-only-public-secret-never-use-in-production .venv/bin/python tokens.py viewer)
+        GATEWAY_TOKEN_SECRET=dev-only-public-secret-never-use-in-production ../../.venv/bin/python tokens.py viewer)
 curl -sX POST localhost:9000/mcp -H "Authorization: Bearer $TOKEN" \
      -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"admin_reset_key"}}'
@@ -160,7 +174,9 @@ reproduce any failure path by hand.
 
 | Symptom | Cause |
 | --- | --- |
-| `no virtualenv at … run ./setup.sh first` | Setup has not run. Run the **Setup** task. |
+| `no virtualenv at … run ./setup.sh first` | Setup has not run. Run the **Setup: install everything** task. |
+| `SecretNotConfigured`, or `tokens.py` prints no token and exits 1 | `GATEWAY_TOKEN_SECRET` is unset or shorter than 32 bytes. There is no default; the Task 2 run tasks set a public dev value. |
+| `ModuleNotFoundError` (e.g. `httpx`) | A command ran under a Python without the dependencies. Use `.venv/bin/python`, or `source .venv/bin/activate` first. |
 | `Refusing to collect more than one project` | You ran `pytest` at the repo root. That is deliberate — use a per-project task; the root README explains why. |
 | A port is already in use | A previous run task is still going. Kill it in the Terminal panel. |
 | MCP server shows no tools | Check the interpreter path in `.vscode/mcp.json` resolves — it assumes `./setup.sh` has run. |

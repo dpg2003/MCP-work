@@ -4,7 +4,7 @@
   // Pytest is pointed at one project at a time. The four projects cannot share
   // a single pytest process -- two of them define a top-level `app.py` and
   // `providers.py`, and sys.modules is global -- so the Testing panel is
-  // configured for Task 4 by default. Change the `--rootdir`/path below to
+  // configured for Task 4 by default. Change `python.testing.cwd` below to
   // explore another project, or use the "Tests: <task>" tasks which run each
   // suite in its own process.
   "python.testing.pytestEnabled": true,
